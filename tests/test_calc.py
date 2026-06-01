@@ -186,10 +186,14 @@ def test_negative_cash_does_not_inflate_weights():
                            color="--c5", sort_order=2, is_cash=True, securities=[])
     classes = [_ac(1, 60, 0, 100, [_sec(1, 100, 4.0)]), cash]  # holdings 400, cash −1000
     dash = compute_dashboard(classes, cash_balance=-1000)
-    assert dash.total_assets == pytest.approx(400)          # cash floored at 0 in denom
-    assert dash.asset_classes[0].current_weight == pytest.approx(100.0)  # not >100
+    # total_assets is the TRUE signed sum (matches the records ledger), but
+    # WEIGHTS use a floored denominator so they stay within 0–100%.
+    assert dash.total_assets == pytest.approx(-600)         # true net (holdings + cash)
+    assert dash.asset_classes[0].current_weight == pytest.approx(100.0)  # 400/400, not >100
     assert dash.asset_classes[1].current_weight == pytest.approx(0.0)    # negative cash → 0%
     assert dash.asset_classes[1].market_value == -1000      # true balance still shown
+    # Negative cash must NOT produce a rebalance suggestion (would mislead).
+    assert all(r.asset_class_id != 2 for r in dash.rebalance)
 
 
 def test_unallocated_pool_balanced():

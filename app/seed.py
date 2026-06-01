@@ -11,7 +11,8 @@ from sqlalchemy import inspect, select, text
 from sqlalchemy.orm import Session
 
 from .database import Base, SessionLocal, engine
-from .models import AssetClass, CashFlow, PriceQuote, Security, Strategy, Transaction
+from .models import (AssetClass, CashFlow, KnowledgeChunk, NotionSource,
+                     PriceQuote, Security, Strategy, Transaction)
 
 # Example asset classes: name, target, band_low, band_high, color, sort_order.
 _EXAMPLE_CLASSES = [
@@ -110,8 +111,11 @@ def init_db():
 
 
 def reset_to_default(db: Session):
-    """Wipe all data and re-seed the example strategy."""
-    for model in (Transaction, PriceQuote, Security, CashFlow, AssetClass, Strategy):
+    """Wipe all data and re-seed the example strategy. Also clears the RAG
+    knowledge base (sources + chunks) so a reset is a true clean slate; re-add
+    Notion sources and re-sync afterward."""
+    for model in (Transaction, PriceQuote, Security, CashFlow, AssetClass, Strategy,
+                  KnowledgeChunk, NotionSource):
         db.query(model).delete()
     db.commit()
     _seed(db)

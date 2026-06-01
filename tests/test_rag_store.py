@@ -97,11 +97,25 @@ def test_search_returns_best_chunk(client):
 def test_limiter_counts_and_caps():
     from app.rag import limiter
     lim = limiter.DailyLimiter(limit=2)
+    # allow() only checks; record() consumes — so failed calls don't burn quota.
     assert lim.allow("2026-05-31") is True
+    lim.record("2026-05-31")
     assert lim.allow("2026-05-31") is True
-    assert lim.allow("2026-05-31") is False
-    assert lim.allow("2026-06-01") is True
+    lim.record("2026-05-31")
+    assert lim.allow("2026-05-31") is False   # 2 recorded, at limit
+    assert lim.allow("2026-06-01") is True     # new day
+    lim.record("2026-06-01")
     assert lim.remaining("2026-06-01") == 1
+
+
+def test_limiter_allow_without_record_does_not_consume():
+    from app.rag import limiter
+    lim = limiter.DailyLimiter(limit=1)
+    # Checking allow() repeatedly without record() must not exhaust the quota
+    # (a failed Claude call calls allow() but never record()).
+    assert lim.allow("d") is True
+    assert lim.allow("d") is True
+    assert lim.remaining("d") == 1
 
 
 def test_sync_source_embeds_and_stores(client, monkeypatch):
@@ -130,5 +144,35 @@ def test_sync_source_embeds_and_stores(client, monkeypatch):
         assert src.last_synced_at is not None
         # Progress is reported through the run: crawl → embed → store.
         assert "embed" in phases and "store" in phases
+    finally:
+        db.close()
+
+
+def test_empty_crawl_does_not_wipe_existing_chunks(client, monkeypatch):
+    # A re-sync that crawls nothing (page emptied / transient failure) must
+    # leave the previously-indexed chunks intact and report -1, not delete them.
+    from app import database
+    from app.models import NotionSource, KnowledgeChunk
+    from app.rag import store, notion, embed
+
+    db = database.SessionLocal()
+    try:
+        src = NotionSource(notion_id="nid", title="策略", kind="page")
+        db.add(src); db.commit(); db.refresh(src)
+        # First sync: real content.
+        monkeypatch.setattr(notion, "crawl_source",
+                            lambda nid, kind, on_progress=None: [
+                                {"page_id": "p1", "url": "u1", "title": "策略", "text": "红利逻辑"}])
+        monkeypatch.setattr(embed, "embed_texts", lambda texts: [[0.1, 0.2] for _ in texts])
+        n1 = store.sync_source(db, src); db.commit()
+        assert n1 >= 1
+        before = db.query(KnowledgeChunk).filter_by(source_id=src.id).count()
+        assert before >= 1
+        # Second sync: crawl returns nothing.
+        monkeypatch.setattr(notion, "crawl_source", lambda nid, kind, on_progress=None: [])
+        n2 = store.sync_source(db, src); db.commit()
+        assert n2 == -1   # signals "no content found"
+        after = db.query(KnowledgeChunk).filter_by(source_id=src.id).count()
+        assert after == before   # NOT wiped
     finally:
         db.close()

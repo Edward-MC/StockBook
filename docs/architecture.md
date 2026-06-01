@@ -94,6 +94,8 @@
 - **2026-05-31** 配色改进:纯色相黄金角会把紫/品红排太近(人眼难分),改为**精挑配色盘 `_PALETTE`(16 色,色相+明度都拉开)+ 按 RGB 感知距离挑离现有最远**;新增 `POST /api/asset-classes/recolor`(贪心重排全部大类为最分散配色)+ 仪表盘「重新配色」按钮,一键修好已撞色的旧数据。
 - **2026-06-01** 修负现金导致占比 >100%:现金大类为负时把各大类对总资产分母的贡献按 0 取下限,占比恒 0–100%(现金显示真实负值、占 0%),并加负现金警告横幅引导补记入金。
 - **2026-06-01** Notion RAG 问答(Phase 2):`app/rag/`(notion/embed/store/snapshot/ask/limiter)+ `routers/rag.py` + 浮动问答小窗(`_rag_widget.html`/`rag.js`)。手动「同步」删旧重建,fastembed 本地向量化,numpy 余弦 top-k,持仓快照注入 prompt,Claude(默认 Haiku)摘要 + 原文引用 + Notion 链接;总开关 + 只读 403 + 每日限流三重护栏;`.env`/`.env.*` 入 `.gitignore`。设计见 `docs/superpowers/specs/2026-05-31-stockbook-rag-qa-design.md`,实现计划见 `docs/superpowers/plans/2026-05-31-notion-rag-qa.md`。
+- **2026-06-01** code-review 修复(数据安全/正确性):①空 crawl 不再删旧重建(否则会悄悄清空已建索引),返回 −1 让上层提示「未抓到内容」;②`/sync` 全失败/全空时返回 `error` 字段且 phase=error,前端不再无脑报「成功」;③负现金大类不再进再平衡建议(金额会无视亏空误导);④`total_assets` 改为**真实带符号合计**(与记录总账一致),另用 floored `weight_denom` 专供占比/再平衡分母(两者解耦,占比仍 0–100%);⑤每日限额改为 `allow()` 只检查、`record()` 只在成功后计数(失败调用不再烧额度);⑥`/sync` 用 `threading.Lock` 守卫 check-and-set(杜绝并发 sync 竞态)。
+- **2026-06-01** code-review 修复(清理/性能):⑦`reset_to_default` 一并清 `NotionSource`/`KnowledgeChunk`(reset 即干净起点);⑧数据库行标题改从 `databases.query` 响应直接取(`fetch_database_rows`),省掉每行一次 `pages.retrieve`;⑨`store.search` 按 `(count,max_id)` sentinel 缓存嵌入矩阵、命中后只取 top-k 文本(不再每次全表载入+解析);⑩`rag.js` 改用 `common.js` 的 `api()`(统一错误处理,校验错误数组不再显示 `[object Object]`)。
 
 ## 8. 约定
 - **新增功能 = 同时更新本文档**(关键决策 / API 一览 / 功能日志)与对应测试。
