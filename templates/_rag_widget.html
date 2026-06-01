@@ -1,0 +1,17 @@
+<!-- Floating RAG Q&A widget. Hidden until /api/rag/status says enabled. -->
+<div id="rag-fab" class="rag-fab" hidden title="笔记问答">问</div>
+<div id="rag-panel" class="rag-panel" hidden>
+  <div class="rag-head">
+    <span>笔记问答</span>
+    <div class="rag-head-actions">
+      <button id="rag-sync" class="rag-btn" title="重新同步知识库">同步</button>
+      <button id="rag-close" class="rag-btn" title="关闭">×</button>
+    </div>
+  </div>
+  <div id="rag-status" class="rag-status"></div>
+  <div id="rag-log" class="rag-log"></div>
+  <form id="rag-form" class="rag-form">
+    <input id="rag-input" class="rag-input" type="text" placeholder="问问你的投资笔记…" autocomplete="off">
+    <button type="submit" class="rag-btn rag-send">问</button>
+  </form>
+</div>

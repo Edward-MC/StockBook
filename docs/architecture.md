@@ -31,8 +31,15 @@
 | `seed.py` | 建表、示例数据播种、轻量迁移(`ALTER TABLE`)、`reset_to_default` |
 | `routers/api.py` | JSON API |
 | `routers/pages.py` | 单页外壳渲染(`/`)+ `/entry` 重定向 |
-| `templates/` | `base.html`(外壳)+ `index.html`(单页:仪表盘 / 持仓 两个页内 tab) |
-| `static/` | `css/style.css`、`js/common.js`(工具)+ `js/app.js`(全部交互) |
+| `routers/rag.py` | RAG 问答 API(总开关 / 只读 403 / 每日限流 三重护栏) |
+| `rag/notion.py` | Notion 抓取 + block→纯文本 + 切块(网络与解析分离,便于测试) |
+| `rag/embed.py` | 本地 fastembed 向量化(中文 BGE,ONNX,零成本,惰性加载) |
+| `rag/store.py` | KnowledgeChunk 存取 + numpy 余弦检索 + `sync_source` 删旧重建 |
+| `rag/snapshot.py` | 精简持仓快照(复用 `build_dashboard`),注入问答 prompt |
+| `rag/ask.py` | prompt 组装(纯函数)+ Claude 调用(缓存 system 块) |
+| `rag/limiter.py` | 进程内每日调用计数(成本护栏) |
+| `templates/` | `base.html`(外壳)+ `index.html`(单页:仪表盘 / 持仓 / 记录 tab)+ `_rag_widget.html`(浮动问答小窗) |
+| `static/` | `css/style.css`、`js/common.js`(工具)+ `js/app.js`(全部交互)+ `js/rag.js`(问答小窗) |
 
 ## 4. 关键决策(Decisions)
 1. **持仓"推导而非存储"**:只存交易(Transaction)与现价(PriceQuote)这两类原始事实,持仓股数/成本/市值/占比/盈亏全部由 `calc.py` 实时算。→ 改一笔交易,所有衍生值自动一致,不会算漏更新。
@@ -50,6 +57,8 @@
 13. **记录板块(交易总账)**:`GET /api/ledger` 合并 买入/卖出/资金注入/移出 为按时间倒序的总账 + 资金概览(注入/移出/净投入/买入/卖出/现金余额/已实现盈亏);筛选(标的/类型/时间/盈亏)在前端做。
 14. **卖出按批次配对(specific-lot)**:卖出必带 `matched_buy_id`,指向某买入批次;已实现盈亏 = (卖价 − 该批次买价) × 股数(精确,非平均)。买入批次「剩余 = 原股数 − Σ指向它的卖出」,均价/盈亏按未平仓批次的剩余加权;**剩余为 0 的批次从持仓视图隐藏**(数据不删,记录可查)。删除带卖出的买入批次、把批次股数改到已卖出量之下,均被拒。
 
+15. **RAG 问答(Phase 2)**:独立 `app/rag/` 子包(notion 解析/抓取、fastembed 本地向量化、numpy 暴力余弦检索、prompt 组装 + Claude)。两张新表 `NotionSource`/`KnowledgeChunk`(向量以 JSON 存 Text 列,不依赖向量扩展,保持单文件可打包)。三重成本/安全护栏:总开关 `STOCKBOOK_RAG_ENABLED`、只读模式 403、每日限流(默认 50,`STOCKBOOK_RAG_DAILY_LIMIT` 可改);key 仅后端、走 .env、不下发前端;同步阶段不调 LLM(仅 Notion + 本地 embed)。默认模型 Haiku(`STOCKBOOK_RAG_MODEL` 可切)。检索接口封装在 `store.search`,日后上万片段可平滑换 sqlite-vec。
+
 ## 5. JSON API 一览
 - `GET /api/dashboard` — 一次性返回页面所需(各大类 + 标的 + 再平衡 + 总资产/估值日期/price_state 等)。
 - 大类:`POST /api/asset-classes`、`PUT/DELETE /api/asset-classes/{id}`。
@@ -61,6 +70,7 @@
 - 记录/现金:`GET /api/ledger`、`POST/DELETE /api/cashflows`。
 - 备份:`POST /api/backup`、`GET /api/backups`、`POST /api/restore`。
 - 重置:`POST /api/reset`(先自动备份)。
+- RAG 问答:`GET /api/rag/status`(始终可用,前端据此决定是否显示问答窗)、`POST /api/rag/ask`(三重护栏:总开关/只读/限流)、`POST /api/rag/sync`(删旧重建,不调 LLM)、`POST/DELETE /api/rag/sources`。
 
 ## 6. 数据模型
 两层:Security 归入 AssetClass,AssetClass 归入 Strategy。持仓由 Transaction 推导;PriceQuote 每标的一条最新价。详见 `models.py` 与设计文档 §3。
@@ -80,6 +90,7 @@
 - **2026-05-31** 记录加「时间 / 配对分组」视图开关:配对分组下每笔买入是一个可折叠批次组(组头:买入日期/价/量 · 当前持有/已清仓 · **该批次累计已实现盈亏**),展开列出它的所有卖出(日期·股数·卖价·盈亏);资金流水在批次下另列。前端 `buildBatches` 由 ledger entries 按 `matched_buy_id` 聚合,UI 测试用 puppeteer-core 驱动系统 Chrome 验证。
 - **2026-05-31** 大类自动配色:新建大类不再手动选色,后端 `_auto_color` 按色相黄金角生成候选、挑离现有大类色相最远的一个(套统一暖色调 S/L),distinct 且无数量上限;颜色存为 hex,`colorVar` 已兼容(`--cN` 旧值走 CSS 变量,hex 直接用);弹窗去掉配色选择。
 - **2026-05-31** 配色改进:纯色相黄金角会把紫/品红排太近(人眼难分),改为**精挑配色盘 `_PALETTE`(16 色,色相+明度都拉开)+ 按 RGB 感知距离挑离现有最远**;新增 `POST /api/asset-classes/recolor`(贪心重排全部大类为最分散配色)+ 仪表盘「重新配色」按钮,一键修好已撞色的旧数据。
+- **2026-06-01** Notion RAG 问答(Phase 2):`app/rag/`(notion/embed/store/snapshot/ask/limiter)+ `routers/rag.py` + 浮动问答小窗(`_rag_widget.html`/`rag.js`)。手动「同步」删旧重建,fastembed 本地向量化,numpy 余弦 top-k,持仓快照注入 prompt,Claude(默认 Haiku)摘要 + 原文引用 + Notion 链接;总开关 + 只读 403 + 每日限流三重护栏;`.env`/`.env.*` 入 `.gitignore`。设计见 `docs/superpowers/specs/2026-05-31-stockbook-rag-qa-design.md`,实现计划见 `docs/superpowers/plans/2026-05-31-notion-rag-qa.md`。
 
 ## 8. 约定
 - **新增功能 = 同时更新本文档**(关键决策 / API 一览 / 功能日志)与对应测试。
