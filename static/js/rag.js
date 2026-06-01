@@ -96,24 +96,31 @@
     progressBar.style.width = pct === null ? '100%' : pct + '%';
   }
 
-  async function pollProgress() {
+  async function pollProgress(render = true) {
     try {
       const r = await fetch('/api/rag/sync/progress');
       const p = await r.json();
-      renderProgress(p);
+      if (render) renderProgress(p);
       return p;
     } catch (e) { return null; }
   }
 
   syncBtn.addEventListener('click', async () => {
     syncBtn.disabled = true; syncBtn.textContent = '同步中…';
-    // Poll progress while the (blocking) sync request runs in the background.
+    // Show progress immediately (don't wait for the first poll, which can race
+    // ahead of the server actually starting the sync).
+    renderProgress({ phase: 'crawl', running: true, pages: 0 });
+    // Poll until the (blocking) /sync request returns; `polling` is the sole
+    // stop signal — don't exit early on a stale idle/done snapshot.
     let polling = true;
     const loop = (async () => {
       while (polling) {
-        const p = await pollProgress();
-        if (p && !p.running && p.phase !== 'crawl') break;
-        await new Promise(res => setTimeout(res, 600));
+        const p = await pollProgress(false);  // don't render here
+        // Only show snapshots from the in-flight sync; ignore a stale
+        // done/idle from a previous run before this one flips running=true.
+        if (p && p.running) renderProgress(p);
+        if (!polling) break;
+        await new Promise(res => setTimeout(res, 500));
       }
     })();
     try {
