@@ -69,6 +69,9 @@ header{display:flex;justify-content:space-between;align-items:flex-end;gap:24px;
   background:var(--card-2);border:1px solid var(--edge-strong);color:var(--ink-3);vertical-align:middle;letter-spacing:0}
 .px-tag.live{background:var(--sage-soft);border-color:#C2D6BB;color:var(--sage)}
 
+.cash-warn{margin-top:22px;padding:12px 16px;border-radius:10px;font-size:13px;line-height:1.6;
+  background:var(--accent-soft);border:1px solid var(--accent);color:var(--accent)}
+
 /* ---------- in-page tabs ---------- */
 .tabs{display:flex;gap:4px;margin-top:26px;border-bottom:1px solid var(--edge-strong)}
 .tab{padding:10px 20px;border:none;background:none;font-family:var(--font-ui);font-size:14.5px;
@@ -409,6 +412,10 @@ table.list td.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums
 }
 
 /* ---------- RAG Q&A widget ---------- */
+/* The [hidden] attribute must win over the display rules below (equal-specificity
+   author rules would otherwise override the browser's [hidden]{display:none}),
+   else toggling .hidden in JS does nothing — the × / fab wouldn't hide. */
+.rag-fab[hidden],.rag-panel[hidden],.rag-progress[hidden]{display:none}
 .rag-fab{position:fixed;right:24px;bottom:24px;z-index:50;width:52px;height:52px;border-radius:16px;
   background:linear-gradient(150deg,var(--accent),#8a3416);color:#FBF1E6;font-family:var(--font-display);
   font-size:22px;display:grid;place-items:center;cursor:pointer;border:none;
