@@ -4,12 +4,15 @@ Networking (`fetch_page_blocks`, `fetch_database_pages`) and parsing
 (`blocks_to_text`, `chunk_text`) are split so the parsers are unit-testable
 without hitting Notion (same convention as quotes.py).
 
-A NotionSource is either a page (crawl its blocks) or a database (crawl each
-row page's blocks). v1 reads top-level blocks only — no recursive child fetch
-(keeps sync simple; deep nesting is a Phase-3 concern, spec §14).
+A NotionSource is either a page or a database. `crawl_source` walks the whole
+tree — a page yields its own text plus every nested child page/database; a
+database expands to its row pages. The walk is breadth-first and fetches each
+level concurrently (a tree of N pages is N serial Notion round-trips otherwise,
+which dominates sync time).
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
 
 from .. import config
@@ -141,6 +144,10 @@ def page_title(page_id: str) -> str:
 # pathological trees / cycles). 5 levels is plenty for hand-organised notes.
 _MAX_DEPTH = 5
 
+# Concurrent Notion requests per level. Notion's API tolerates a handful of
+# parallel calls; the SDK client is thread-safe for separate requests.
+_FETCH_WORKERS = 8
+
 
 def _child_refs(blocks: List[dict]) -> List[Dict[str, str]]:
     """Extract nested child pages/databases from a page's blocks. Notion puts
@@ -158,48 +165,81 @@ def _child_refs(blocks: List[dict]) -> List[Dict[str, str]]:
     return refs
 
 
+def _scan_page(pid: str, title_path: str) -> Dict:
+    """Fetch one page's blocks (the slow network part). Returns the page's
+    text record (if it has prose) and its child page/database refs. Pure
+    per-page work with no shared state — safe to run in a worker thread."""
+    blocks = fetch_page_blocks(pid)
+    text = blocks_to_text(blocks)
+    record = None
+    if text.strip():
+        record = {"page_id": pid, "url": notion_page_url(pid),
+                  "title": title_path, "text": text}
+    return {"record": record, "children": _child_refs(blocks), "title_path": title_path}
+
+
 def crawl_source(notion_id: str, kind: str) -> List[Dict[str, str]]:
-    """Yield {page_id, url, title, text} for every page under a source,
-    recursing into nested child pages/databases (spec §14 enhancement).
+    """Return {page_id, url, title, text} for every page under a source,
+    recursing into nested child pages/databases.
 
     `title` is a breadcrumb path ("父 / 子 / 孙") so citations locate the right
     sub-page. A database expands to its row pages; a page yields its own text
-    plus everything beneath it. Pages with no prose of their own (pure
-    containers of child pages) contribute nothing themselves but are still
-    descended into.
+    plus everything beneath it. Container pages with no prose of their own
+    contribute nothing but are still descended into.
+
+    The walk is breadth-first, fetching all pages at a given depth concurrently
+    (see _FETCH_WORKERS) — the per-page Notion round-trip is the bottleneck.
     """
     out: List[Dict[str, str]] = []
     seen: set = set()  # guard against cycles / duplicate links
 
-    def walk_page(pid: str, title_path: str, depth: int) -> None:
-        if depth > _MAX_DEPTH or pid in seen:
-            return
-        seen.add(pid)
-        blocks = fetch_page_blocks(pid)
-        text = blocks_to_text(blocks)
-        if text.strip():
-            out.append({
-                "page_id": pid,
-                "url": notion_page_url(pid),
-                "title": title_path,
-                "text": text,
-            })
-        for ref in _child_refs(blocks):
-            child_path = f"{title_path} / {ref['title']}"
-            if ref["kind"] == "database":
-                walk_database(ref["id"], child_path, depth + 1)
-            else:
-                walk_page(ref["id"], child_path, depth + 1)
+    def _expand_db(dbid: str, title_path: str) -> List[tuple]:
+        """A database → (row_page_id, breadcrumb) pairs for the next level."""
+        return [(row_id, f"{title_path} / {page_title(row_id)}")
+                for row_id in fetch_database_page_ids(dbid)]
 
-    def walk_database(dbid: str, title_path: str, depth: int) -> None:
-        if depth > _MAX_DEPTH or dbid in seen:
-            return
-        seen.add(dbid)
-        for row_id in fetch_database_page_ids(dbid):
-            walk_page(row_id, f"{title_path} / {page_title(row_id)}", depth + 1)
-
+    # Seed the first level: the source itself (a page, or each row of a db).
+    root_title = page_title(notion_id)
     if kind == "database":
-        walk_database(notion_id, page_title(notion_id), 0)
+        seen.add(notion_id)
+        level = _expand_db(notion_id, root_title)
     else:
-        walk_page(notion_id, page_title(notion_id), 0)
+        level = [(notion_id, root_title)]
+
+    depth = 0
+    while level and depth <= _MAX_DEPTH:
+        # Dedupe this level against everything already visited.
+        batch = [(pid, tp) for pid, tp in level if pid not in seen]
+        for pid, _ in batch:
+            seen.add(pid)
+        if not batch:
+            break
+
+        # Fetch every page in this level concurrently.
+        scans = []
+        with ThreadPoolExecutor(max_workers=_FETCH_WORKERS) as pool:
+            futures = {pool.submit(_scan_page, pid, tp): pid for pid, tp in batch}
+            for fut in as_completed(futures):
+                scans.append(fut.result())
+
+        # Collect text + build the next level (child pages descend directly;
+        # child databases are expanded — concurrently too, since each is a call).
+        next_level: List[tuple] = []
+        db_refs = []
+        for scan in scans:
+            if scan["record"]:
+                out.append(scan["record"])
+            for ref in scan["children"]:
+                child_path = f"{scan['title_path']} / {ref['title']}"
+                if ref["kind"] == "database":
+                    db_refs.append((ref["id"], child_path))
+                elif ref["id"] not in seen:
+                    next_level.append((ref["id"], child_path))
+        if db_refs:
+            with ThreadPoolExecutor(max_workers=_FETCH_WORKERS) as pool:
+                for rows in pool.map(lambda a: _expand_db(*a), db_refs):
+                    next_level.extend(rows)
+
+        level = next_level
+        depth += 1
     return out
