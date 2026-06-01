@@ -217,7 +217,10 @@ def compute_dashboard(classes: List[AssetClassInput], *, cash_balance: float = 0
                 cv += mv
         class_values[ac.id] = cv
 
-    total_assets = sum(class_values.values())
+    # A negative cash class (usually: deposits not yet recorded) must NOT shrink
+    # the denominator, or every other class's weight would blow past 100%.
+    # Floor each class's contribution at 0 for the total/weights.
+    total_assets = sum(max(0.0, v) for v in class_values.values())
 
     asset_class_views: List[AssetClassView] = []
     pending: List[SecurityView] = []
@@ -232,7 +235,7 @@ def compute_dashboard(classes: List[AssetClassInput], *, cash_balance: float = 0
             cost_value, mv, pnl, pnl_pct = derive_holding(sec.shares, sec.price, sec.avg_cost)
             is_pending = mv is None
             w_in_class = (mv / class_mv * 100.0) if (mv is not None and class_mv > 0) else None
-            w_in_total = (mv / total_assets * 100.0) if (mv is not None and total_assets > 0) else None
+            w_in_total = (min(mv, total_assets) / total_assets * 100.0) if (mv is not None and total_assets > 0) else None
             sv = SecurityView(
                 id=sec.id, code=sec.code, name=sec.name, market=sec.market,
                 shares=sec.shares, price=sec.price, avg_cost=sec.avg_cost,
@@ -244,7 +247,9 @@ def compute_dashboard(classes: List[AssetClassInput], *, cash_balance: float = 0
             if is_pending:
                 pending.append(sv)
 
-        current_weight = (class_mv / total_assets * 100.0) if total_assets > 0 else None
+        # Negative class value (negative cash) → 0% rather than a nonsensical
+        # negative/over-100 weight.
+        current_weight = (max(0.0, class_mv) / total_assets * 100.0) if total_assets > 0 else None
         status = _classify(current_weight, ac.band_low, ac.band_high)
         deviation = (current_weight - ac.target_weight) if current_weight is not None else None
         reb_amount = (

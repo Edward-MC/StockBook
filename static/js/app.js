@@ -156,6 +156,16 @@ function computeAxis() {
 }
 
 function renderTopstats() {
+  const warn = byId("cash-warn");
+  if (warn) {
+    if (DASH.cash_balance < 0) {
+      warn.hidden = false;
+      warn.innerHTML = `⚠ 现金余额为负(${money(DASH.cash_balance)})——通常是<b>还没记录资金注入</b>。` +
+        `占比已按现金 0 计算以保持正常;请到「记录」tab 点「＋ 资金流水」补记入金。`;
+    } else {
+      warn.hidden = true;
+    }
+  }
   byId("stat-total").textContent = money(DASH.total_assets);
   const dn = byId("stat-deviating");
   dn.textContent = `${DASH.deviating_count} / ${DASH.asset_classes.length}`;
