@@ -217,10 +217,13 @@ def compute_dashboard(classes: List[AssetClassInput], *, cash_balance: float = 0
                 cv += mv
         class_values[ac.id] = cv
 
-    # A negative cash class (usually: deposits not yet recorded) must NOT shrink
-    # the denominator, or every other class's weight would blow past 100%.
-    # Floor each class's contribution at 0 for the total/weights.
-    total_assets = sum(max(0.0, v) for v in class_values.values())
+    # `total_assets` is the TRUE signed sum (holdings + cash), shown on the
+    # dashboard and consistent with the records ledger's 总资产.
+    total_assets = sum(class_values.values())
+    # `weight_denom` is what weights/rebalance divide by: a negative cash class
+    # (usually deposits not yet recorded) must NOT shrink it, or every other
+    # class's weight would blow past 100%. Floor each contribution at 0.
+    weight_denom = sum(max(0.0, v) for v in class_values.values())
 
     asset_class_views: List[AssetClassView] = []
     pending: List[SecurityView] = []
@@ -235,7 +238,7 @@ def compute_dashboard(classes: List[AssetClassInput], *, cash_balance: float = 0
             cost_value, mv, pnl, pnl_pct = derive_holding(sec.shares, sec.price, sec.avg_cost)
             is_pending = mv is None
             w_in_class = (mv / class_mv * 100.0) if (mv is not None and class_mv > 0) else None
-            w_in_total = (min(mv, total_assets) / total_assets * 100.0) if (mv is not None and total_assets > 0) else None
+            w_in_total = (mv / weight_denom * 100.0) if (mv is not None and weight_denom > 0) else None
             sv = SecurityView(
                 id=sec.id, code=sec.code, name=sec.name, market=sec.market,
                 shares=sec.shares, price=sec.price, avg_cost=sec.avg_cost,
@@ -249,20 +252,23 @@ def compute_dashboard(classes: List[AssetClassInput], *, cash_balance: float = 0
 
         # Negative class value (negative cash) → 0% rather than a nonsensical
         # negative/over-100 weight.
-        current_weight = (max(0.0, class_mv) / total_assets * 100.0) if total_assets > 0 else None
+        current_weight = (max(0.0, class_mv) / weight_denom * 100.0) if weight_denom > 0 else None
         status = _classify(current_weight, ac.band_low, ac.band_high)
         deviation = (current_weight - ac.target_weight) if current_weight is not None else None
         reb_amount = (
-            rebalance_amount(ac.target_weight, current_weight, total_assets)
+            rebalance_amount(ac.target_weight, current_weight, weight_denom)
             if current_weight is not None else None
         )
 
-        if status in (STATUS_UNDER, STATUS_OVER):
+        # A class whose value is negative (negative cash) is shown at 0% but must
+        # NOT generate a rebalance suggestion: the amount would ignore the deficit
+        # magnitude and mislead. The negative-cash banner already prompts the fix.
+        if status in (STATUS_UNDER, STATUS_OVER) and class_mv >= 0:
             deviating_count += 1
             # Amount to just re-enter the band edge (cheaper than going to target):
             # over → down to band_high; under → up to band_low.
             edge = ac.band_high if status == STATUS_OVER else ac.band_low
-            edge_amount = (edge - current_weight) / 100.0 * total_assets
+            edge_amount = (edge - current_weight) / 100.0 * weight_denom
             rebalance.append(RebalanceSuggestion(
                 asset_class_id=ac.id, name=ac.name, color=ac.color, status=status,
                 amount=reb_amount, edge_amount=edge_amount,

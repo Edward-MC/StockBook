@@ -12,6 +12,7 @@ import json
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from .. import config
@@ -59,6 +60,27 @@ def replace_source_chunks(db: Session, source: NotionSource,
     return len(chunks)
 
 
+# Cached embedding matrix for retrieval. Keyed on a cheap (count, max_id)
+# sentinel so it auto-invalidates whenever chunks are added/removed (resync,
+# reset). Avoids re-loading and re-parsing every embedding on every question.
+_embed_cache: Dict[str, object] = {"key": None, "ids": [], "matrix": None}
+
+
+def _embedding_index(db: Session):
+    """Return (ids, matrix) of all chunk embeddings, rebuilding the cache only
+    when the chunk set changed. matrix is None when the KB is empty."""
+    count = db.query(KnowledgeChunk.id).count()
+    max_id = db.query(func.max(KnowledgeChunk.id)).scalar() or 0
+    key = (count, max_id)
+    if _embed_cache["key"] != key:
+        rows = db.query(KnowledgeChunk.id, KnowledgeChunk.embedding).all()
+        ids = [r[0] for r in rows]
+        matrix = (np.asarray([json.loads(r[1]) for r in rows], dtype=np.float32)
+                  if rows else None)
+        _embed_cache.update(key=key, ids=ids, matrix=matrix)
+    return _embed_cache["ids"], _embed_cache["matrix"]
+
+
 def search(db: Session, query_vec: List[float], k: Optional[int] = None) -> List[Dict]:
     """Return the top-k chunks most similar to query_vec as dicts with text,
     notion_url, title_path, score. An empty query vector (e.g. embedding of an
@@ -67,15 +89,22 @@ def search(db: Session, query_vec: List[float], k: Optional[int] = None) -> List
         return []
     if k is None:
         k = config.RAG_TOP_K
-    all_rows = db.query(KnowledgeChunk).all()
-    if not all_rows:
+    ids, matrix = _embedding_index(db)
+    if matrix is None:
         return []
-    rows = [(c.id, json.loads(c.embedding)) for c in all_rows]
+    rows = list(zip(ids, matrix))  # (id, vector) — vector is a numpy row view
     ranked = cosine_top_k(query_vec, rows, k)
-    by_id = {c.id: c for c in all_rows}
+    if not ranked:
+        return []
+    # Fetch only the top-k chunks' full rows (not the whole table).
+    top_ids = [cid for cid, _ in ranked]
+    by_id = {c.id: c for c in
+             db.query(KnowledgeChunk).filter(KnowledgeChunk.id.in_(top_ids)).all()}
     out: List[Dict] = []
     for cid, score in ranked:
-        c = by_id[cid]
+        c = by_id.get(cid)
+        if c is None:
+            continue
         out.append({
             "id": c.id, "text": c.text, "notion_url": c.notion_url,
             "title_path": c.title_path, "score": score,
@@ -113,12 +142,19 @@ def sync_source(db: Session, source: NotionSource, on_progress=None) -> int:
                 "title_path": page.get("title", ""), "text": piece,
             })
     total = len(records)
-    if total:
-        _report("embed", done=0, total=total)
-        vectors = embed.embed_texts([r["text"] for r in records])
-        for r, v in zip(records, vectors):
-            r["embedding"] = v
-        _report("embed", done=total, total=total)
+    # An empty crawl (page moved/emptied, or a transient Notion failure that
+    # yields no pages) must NOT delete-and-rebuild — that would silently wipe a
+    # previously-indexed source. Leave existing chunks intact and signal "no
+    # content found" via a negative count so the caller can surface it.
+    if total == 0:
+        _report("store")
+        source.last_synced_at = dt.datetime.now()
+        return -1
+    _report("embed", done=0, total=total)
+    vectors = embed.embed_texts([r["text"] for r in records])
+    for r, v in zip(records, vectors):
+        r["embedding"] = v
+    _report("embed", done=total, total=total)
     _report("store")
     n = replace_source_chunks(db, source, records)
     source.last_synced_at = dt.datetime.now()

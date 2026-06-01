@@ -15,12 +15,14 @@ class DailyLimiter:
         self._counts: Dict[str, int] = {}
 
     def allow(self, day: str) -> bool:
-        """Record one call for `day`; return False if it exceeds the limit."""
-        used = self._counts.get(day, 0)
-        if used >= self.limit:
-            return False
-        self._counts[day] = used + 1
-        return True
+        """True if another call for `day` is within the limit. Does NOT consume
+        a slot — call record() only after the call actually succeeds, so failed
+        calls (e.g. missing API key) don't burn quota."""
+        return self._counts.get(day, 0) < self.limit
+
+    def record(self, day: str) -> None:
+        """Consume one slot for `day` (call after a successful billable call)."""
+        self._counts[day] = self._counts.get(day, 0) + 1
 
     def remaining(self, day: str) -> int:
         return max(0, self.limit - self._counts.get(day, 0))
