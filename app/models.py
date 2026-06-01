@@ -10,7 +10,7 @@ versions add rows/columns rather than restructuring tables.
 import datetime as dt
 from typing import List, Optional
 
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, func
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -125,3 +125,37 @@ class CashFlow(Base):
     direction: Mapped[str] = mapped_column(String, nullable=False)  # "in" | "out"
     amount: Mapped[float] = mapped_column(Float, nullable=False)
     note: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+
+class NotionSource(Base):
+    """A Notion page/database the user authorized for the knowledge base.
+    Only these are crawled (spec §2:指定几个页面/库, not whole workspace)."""
+    __tablename__ = "notion_sources"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    notion_id: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    title: Mapped[str] = mapped_column(String, nullable=False, default="")
+    kind: Mapped[str] = mapped_column(String, nullable=False, default="page")  # "page" | "database"
+    last_synced_at: Mapped[Optional[dt.datetime]] = mapped_column(DateTime, nullable=True)
+
+    chunks: Mapped[List["KnowledgeChunk"]] = relationship(
+        back_populates="source", cascade="all, delete-orphan",
+    )
+
+
+class KnowledgeChunk(Base):
+    """One embedded text fragment from a Notion page. Embedding is a JSON list
+    in a Text column — portable across SQLite builds (no vector extension).
+    Retrieval is brute-force numpy cosine over all chunks (spec §5)."""
+    __tablename__ = "knowledge_chunks"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("notion_sources.id"), nullable=False)
+    notion_page_id: Mapped[str] = mapped_column(String, nullable=False)
+    notion_url: Mapped[str] = mapped_column(String, nullable=False, default="")
+    title_path: Mapped[str] = mapped_column(String, nullable=False, default="")
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding: Mapped[str] = mapped_column(Text, nullable=False)  # JSON-encoded list[float]
+    seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    source: Mapped["NotionSource"] = relationship(back_populates="chunks")

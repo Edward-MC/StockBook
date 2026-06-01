@@ -9,6 +9,15 @@ from pathlib import Path
 # Project root (one level above the app/ package).
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# Load a local .env (gitignored) before any os.getenv below, so secrets like
+# NOTION_TOKEN / ANTHROPIC_API_KEY work with a plain `uvicorn main:app`.
+# Real environment variables still take precedence (override=False).
+try:
+    from dotenv import load_dotenv
+    load_dotenv(BASE_DIR / ".env", override=False)
+except ImportError:  # python-dotenv optional; absence just means no .env loading
+    pass
+
 # SQLite single-file database — portable, easy to ship to others.
 DATABASE_URL = os.getenv("STOCKBOOK_DATABASE_URL", f"sqlite:///{BASE_DIR / 'stockbook.db'}")
 
@@ -31,3 +40,24 @@ QUOTE_SOURCES = tuple(
 
 TEMPLATES_DIR = BASE_DIR / "templates"
 STATIC_DIR = BASE_DIR / "static"
+
+# --------------------------------------------------------------------------- #
+# RAG Q&A (Phase 2). Feature is OFF unless explicitly enabled. Keys come only
+# from the environment — never stored in the DB or sent to the frontend.
+# --------------------------------------------------------------------------- #
+RAG_ENABLED = os.getenv("STOCKBOOK_RAG_ENABLED", "").lower() in {"1", "true", "yes"}
+
+NOTION_TOKEN = os.getenv("NOTION_TOKEN", "")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+
+# Daily cap on /api/rag/ask calls (cost protection). Editable via env.
+RAG_DAILY_LIMIT = int(os.getenv("STOCKBOOK_RAG_DAILY_LIMIT", "50"))
+
+# Answer model — default to the cheap/fast Haiku; switchable via env.
+RAG_MODEL = os.getenv("STOCKBOOK_RAG_MODEL", "claude-haiku-4-5-20251001")
+
+# Retrieval / context trimming (cost protection).
+RAG_TOP_K = int(os.getenv("STOCKBOOK_RAG_TOP_K", "5"))
+RAG_CHUNK_CHARS = int(os.getenv("STOCKBOOK_RAG_CHUNK_CHARS", "1200"))      # chunk size when splitting
+RAG_EXCERPT_CHARS = int(os.getenv("STOCKBOOK_RAG_EXCERPT_CHARS", "800"))    # per-chunk cap in prompt
+RAG_EMBED_MODEL = os.getenv("STOCKBOOK_RAG_EMBED_MODEL", "BAAI/bge-small-zh-v1.5")

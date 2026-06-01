@@ -5,6 +5,17 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 
+@pytest.fixture(autouse=True)
+def _clean_rag_flags(monkeypatch):
+    # A developer's local .env (auto-loaded by config) may set RAG_ENABLED=1 and
+    # real API keys. Force a known-OFF baseline so tests never depend on it — and
+    # never accidentally hit the live Claude API. Tests that need RAG on flip
+    # these via their own monkeypatch.
+    from app import config
+    monkeypatch.setattr(config, "RAG_ENABLED", False)
+    monkeypatch.setattr(config, "READONLY", False)
+
+
 @pytest.fixture()
 def client(tmp_path):
     # Build a throwaway engine bound to a per-test SQLite file and rebind the

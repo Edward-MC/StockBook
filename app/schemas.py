@@ -194,3 +194,13 @@ class DashboardOut(BaseModel):
     asset_classes: List[AssetClassOut]
     rebalance: List[RebalanceOut]
     pending_securities: List[SecurityOut]
+
+
+class AskRequest(BaseModel):
+    question: str = Field(..., min_length=1)
+
+
+class NotionSourceCreate(BaseModel):
+    notion_id: str = Field(..., min_length=1)
+    title: Optional[str] = ""
+    kind: str = "page"  # "page" | "database"

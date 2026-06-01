@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from app import config
-from app.routers import api, pages
+from app.routers import api, pages, rag
 from app.seed import init_db
 
 
@@ -25,3 +25,4 @@ app = FastAPI(title="StockBook · 衡", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(config.STATIC_DIR)), name="static")
 app.include_router(api.router)
 app.include_router(pages.router)
+app.include_router(rag.router)
