@@ -1,0 +1,12 @@
+# 仅放工具配置 —— StockBook 不是可 pip 安装的包,故意不写 [build-system]/[project]。
+[tool.coverage.run]
+source = ["app"]
+# 入口胶水无独立逻辑、由 import 即覆盖,排除以免噪音:
+omit = ["app/main.py"]
+
+[tool.coverage.report]
+exclude_lines = ["pragma: no cover", "raise NotImplementedError"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
