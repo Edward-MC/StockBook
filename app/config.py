@@ -9,6 +9,15 @@ from pathlib import Path
 # Project root (one level above the app/ package).
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# Load a local .env (gitignored) before any os.getenv below, so secrets like
+# NOTION_TOKEN / ANTHROPIC_API_KEY work with a plain `uvicorn main:app`.
+# Real environment variables still take precedence (override=False).
+try:
+    from dotenv import load_dotenv
+    load_dotenv(BASE_DIR / ".env", override=False)
+except ImportError:  # python-dotenv optional; absence just means no .env loading
+    pass
+
 # SQLite single-file database — portable, easy to ship to others.
 DATABASE_URL = os.getenv("STOCKBOOK_DATABASE_URL", f"sqlite:///{BASE_DIR / 'stockbook.db'}")
 
