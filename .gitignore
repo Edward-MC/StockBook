@@ -13,3 +13,7 @@ __pycache__/
 
 # IDE
 .idea/
+
+# Claude Code — personal local settings (per-machine permission allowlist);
+# shared config belongs in .claude/settings.json instead.
+.claude/settings.local.json
