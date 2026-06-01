@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{% block title %}衡 · 投资策略追踪器{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;1,9..144,400&family=Noto+Sans+SC:wght@400;500;700&family=Noto+Serif+SC:wght@500;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/css/style.css" />
+  <script>
+    window.STOCKBOOK = {
+      readonly: {{ 'true' if readonly else 'false' }},
+      hideAmounts: {{ 'true' if hide_amounts else 'false' }},
+      autoRefresh: {{ 'true' if auto_refresh else 'false' }}
+    };
+  </script>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="brand">
+        <div class="seal">衡</div>
+        <div>
+          <h1>投资策略追踪器</h1>
+          <div class="tag">大类配置 · 区间再平衡</div>
+        </div>
+      </div>
+      <div class="head-right">
+        <div class="head-top">
+          {% if readonly %}<span class="ro-badge">只读分享</span>{% endif %}
+          {% if not readonly %}<button class="btn refresh-btn" id="refresh-prices" data-write>↻ 刷新行情</button>{% endif %}
+          {% if not readonly %}<button class="btn refresh-btn" id="backup-db" data-write>⤓ 备份</button>{% endif %}
+        </div>
+        <div class="topstats">
+          <div class="topstat"><div class="k">总资产</div><div class="v" id="stat-total">—</div></div>
+          <div class="topstat"><div class="k">偏离类别</div><div class="v warn" id="stat-deviating">—</div></div>
+          <div class="topstat"><div class="k">估值日期</div><div class="v" style="font-size:15px" id="stat-date">—</div></div>
+        </div>
+      </div>
+    </header>
+
+    {% block content %}{% endblock %}
+
+    <div class="foot">数据本地存储 · 单用户 · 手动录入(自动行情接口待接入)</div>
+  </div>
+
+  <div id="toast"></div>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

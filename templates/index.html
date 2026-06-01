@@ -1,0 +1,180 @@
+{% extends "base.html" %}
+{% block title %}衡 · 投资策略追踪器{% endblock %}
+
+{% block content %}
+<div class="tabs">
+  <button class="tab active" data-tab="dashboard">仪表盘</button>
+  <button class="tab" data-tab="holdings">持仓</button>
+  <button class="tab" data-tab="records">记录</button>
+</div>
+
+<!-- ============ 仪表盘 ============ -->
+<div class="panel" id="panel-dashboard">
+  <!-- 目标配置 -->
+  <section>
+    <div class="sechead">
+      <h2>目标配置</h2>
+      <span class="note">自上而下设定各大类目标;未分配为负也没关系,自己慢慢调到 0 再保存</span>
+    </div>
+    <div class="card">
+      <div class="allocbar-wrap">
+        <div class="barlabel"><span class="t">目标权重</span></div>
+        <div class="stack" id="targetStack"></div>
+        <div class="barlabel" style="margin-top:14px"><span class="t">实际持仓</span></div>
+        <div class="stack actual" id="actualStack"></div>
+        <div class="legend" id="legend"></div>
+      </div>
+      <div class="sliders" id="sliders"></div>
+      <div class="sfoot">
+        <div class="total-chip" id="unalloc">未分配 <b>—</b></div>
+        <div class="actions">
+          <button class="btn primary" id="save-targets" data-write>保存目标</button>
+          <button class="btn" id="add-class" data-write>＋ 新增大类</button>
+          <button class="btn" id="recolor" data-write>重新配色</button>
+          <button class="btn" id="reset-default" data-write>重置为默认</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 持仓与偏离 -->
+  <section>
+    <div class="sechead">
+      <h2>持仓与偏离</h2>
+      <span class="note">圆点为实际占比,竖线为目标,浅绿区域为容忍区间 · 点击展开标的</span>
+    </div>
+    <div class="card hold" id="holdings"></div>
+    <div class="pending-note" id="pending-note" hidden></div>
+  </section>
+
+  <!-- 再平衡建议 -->
+  <section>
+    <div class="sechead">
+      <h2>再平衡建议</h2>
+      <span class="note">将超出区间的类别拉回目标所需的操作</span>
+    </div>
+    <div class="card rebal" id="rebal"></div>
+  </section>
+</div>
+
+<!-- ============ 持仓 ============ -->
+<div class="panel" id="panel-holdings" hidden>
+  <section style="animation:none">
+    <div class="sechead">
+      <h2>持仓明细</h2>
+      <span class="note">点击标的展开持仓批次 · 每个批次卡片右上角可「卖出」</span>
+      <span style="flex:1"></span>
+      <button class="btn primary" id="add-trade" data-write>＋ 记一笔交易</button>
+    </div>
+    <div class="card" id="holdings-list"></div>
+  </section>
+</div>
+
+<!-- ============ 记录 ============ -->
+<div class="panel" id="panel-records" hidden>
+  <section style="animation:none">
+    <div class="sechead">
+      <h2>交易记录</h2>
+      <span class="note">买入 / 卖出 / 资金注入 / 资金移出 总账 · 可筛选</span>
+      <span style="flex:1"></span>
+      <button class="btn primary" id="add-cash" data-write>＋ 资金流水</button>
+    </div>
+    <div class="card cash-overview" id="cash-overview"></div>
+    <div class="rec-filters" id="rec-filters"></div>
+    <div class="card ledger" id="ledger-list"></div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<!-- 大类 新增/编辑 弹窗 -->
+<div class="modal-bg" id="ac-modal">
+  <div class="modal">
+    <h3 id="ac-modal-title">新增大类</h3>
+    <div class="form-grid">
+      <div class="field full"><label>名称</label><input id="m-name" placeholder="如 黄金 / 海外" /></div>
+      <div class="field"><label>目标 %</label><input id="m-target" class="num-in" type="number" min="0" max="100" value="0" /></div>
+      <div class="field"><label>区间下限 %</label><input id="m-low" class="num-in" type="number" min="0" max="100" value="0" /></div>
+      <div class="field"><label>区间上限 %</label><input id="m-high" class="num-in" type="number" min="0" max="100" value="100" /></div>
+      <div class="field full"><label class="check-label"><input type="checkbox" id="m-cash" /> 现金类(存放资金注入,无标的;全局唯一)</label></div>
+    </div>
+    <div class="form-foot">
+      <button class="btn primary" id="m-save">保存</button>
+      <button class="btn" id="m-cancel">取消</button>
+      <span style="flex:1"></span>
+      <button class="btn danger" id="m-delete" hidden>删除该大类</button>
+    </div>
+  </div>
+</div>
+
+<!-- 记一笔买入 弹窗 -->
+<div class="modal-bg" id="trade-modal">
+  <div class="modal">
+    <h3>记一笔买入</h3>
+    <div class="form-grid">
+      <div class="field"><label>代码</label><input id="t-code" class="num-in" placeholder="如 510300" /></div>
+      <div class="field"><label>所属大类<span style="color:var(--ink-3)">(新标的)</span></label><select id="t-ac"></select></div>
+      <div class="field"><label>日期</label><input id="t-date" type="date" /></div>
+      <div class="field"><label>股数</label><input id="t-shares" class="num-in" type="number" min="0" step="1" placeholder="100" /></div>
+      <div class="field"><label>买入价</label><input id="t-price" class="num-in" type="number" min="0" step="0.001" placeholder="3.80" /></div>
+      <div class="field"><label>预期卖价(可选)</label><input id="t-target" class="num-in" type="number" min="0" step="0.001" placeholder="如 4.60" /></div>
+    </div>
+    <div class="form-foot">
+      <button class="btn primary" id="t-save">记录买入</button>
+      <button class="btn" id="t-cancel">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- 卖出(从某买入批次)弹窗 -->
+<div class="modal-bg" id="sell-modal">
+  <div class="modal">
+    <h3>卖出</h3>
+    <p class="modal-info" id="sell-info"></p>
+    <div class="form-grid">
+      <div class="field"><label>卖出股数</label><input id="sell-shares" class="num-in" type="number" min="0" step="1" /></div>
+      <div class="field"><label>卖价</label><input id="sell-price" class="num-in" type="number" min="0" step="0.001" /></div>
+      <div class="field full"><label>日期</label><input id="sell-date" type="date" /></div>
+    </div>
+    <div class="form-foot">
+      <button class="btn primary" id="sell-save">确认卖出</button>
+      <button class="btn" id="sell-cancel">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- 数据备份 / 恢复 弹窗 -->
+<div class="modal-bg" id="backup-modal">
+  <div class="modal">
+    <h3>数据备份 / 恢复</h3>
+    <div class="form-foot" style="margin-top:0;margin-bottom:16px">
+      <button class="btn primary" id="bk-now">＋ 立即备份</button>
+      <span style="flex:1"></span>
+      <button class="btn" id="bk-close">关闭</button>
+    </div>
+    <div id="bk-list"></div>
+  </div>
+</div>
+
+<!-- 资金流水 弹窗 -->
+<div class="modal-bg" id="cash-modal">
+  <div class="modal">
+    <h3>资金流水</h3>
+    <div class="form-grid">
+      <div class="field"><label>方向</label>
+        <select id="cf-dir"><option value="in">资金注入</option><option value="out">资金移出</option></select>
+      </div>
+      <div class="field"><label>日期</label><input id="cf-date" type="date" /></div>
+      <div class="field"><label>金额</label><input id="cf-amount" class="num-in" type="number" min="0" step="0.01" placeholder="10000" /></div>
+      <div class="field full"><label>备注(可选)</label><input id="cf-note" placeholder="如 初始入金 / 取出应急" /></div>
+    </div>
+    <div class="form-foot">
+      <button class="btn primary" id="cf-save">记录</button>
+      <button class="btn" id="cf-cancel">取消</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/js/common.js"></script>
+<script src="/static/js/app.js"></script>
+{% endblock %}
