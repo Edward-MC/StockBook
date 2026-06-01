@@ -178,7 +178,7 @@ def _scan_page(pid: str, title_path: str) -> Dict:
     return {"record": record, "children": _child_refs(blocks), "title_path": title_path}
 
 
-def crawl_source(notion_id: str, kind: str) -> List[Dict[str, str]]:
+def crawl_source(notion_id: str, kind: str, on_progress=None) -> List[Dict[str, str]]:
     """Return {page_id, url, title, text} for every page under a source,
     recursing into nested child pages/databases.
 
@@ -189,9 +189,13 @@ def crawl_source(notion_id: str, kind: str) -> List[Dict[str, str]]:
 
     The walk is breadth-first, fetching all pages at a given depth concurrently
     (see _FETCH_WORKERS) — the per-page Notion round-trip is the bottleneck.
+
+    `on_progress(pages_scanned)` is called from the main thread as each page is
+    fetched, so callers can surface sync progress.
     """
     out: List[Dict[str, str]] = []
     seen: set = set()  # guard against cycles / duplicate links
+    scanned = 0
 
     def _expand_db(dbid: str, title_path: str) -> List[tuple]:
         """A database → (row_page_id, breadcrumb) pairs for the next level."""
@@ -221,6 +225,9 @@ def crawl_source(notion_id: str, kind: str) -> List[Dict[str, str]]:
             futures = {pool.submit(_scan_page, pid, tp): pid for pid, tp in batch}
             for fut in as_completed(futures):
                 scans.append(fut.result())
+                scanned += 1
+                if on_progress:
+                    on_progress(scanned)
 
         # Collect text + build the next level (child pages descend directly;
         # child databases are expanded — concurrently too, since each is a call).

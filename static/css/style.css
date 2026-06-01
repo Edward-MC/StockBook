@@ -434,3 +434,11 @@ table.list td.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums
 .rag-input{flex:1;border:1px solid var(--edge-strong);border-radius:9px;padding:8px 11px;
   font-family:var(--font-ui);font-size:13.5px;background:var(--card-2);color:var(--ink)}
 .rag-send{background:var(--accent);color:#FBF1E6;border-color:var(--accent)}
+.rag-progress{padding:8px 14px;border-bottom:1px solid var(--edge)}
+.rag-progress-text{font-size:11.5px;color:var(--ink-2);margin-bottom:5px}
+.rag-progress-track{height:6px;border-radius:6px;background:var(--card-2);
+  border:1px solid var(--edge);overflow:hidden}
+.rag-progress-bar{height:100%;background:var(--accent);border-radius:6px;
+  transition:width .3s ease;width:0}
+.rag-progress-bar.indeterminate{width:40%!important;animation:rag-indet 1.1s ease-in-out infinite}
+@keyframes rag-indet{0%{margin-left:-40%}100%{margin-left:100%}}

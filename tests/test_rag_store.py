@@ -110,7 +110,7 @@ def test_sync_source_embeds_and_stores(client, monkeypatch):
     from app.rag import store, notion, embed
 
     monkeypatch.setattr(notion, "crawl_source",
-                        lambda nid, kind: [
+                        lambda nid, kind, on_progress=None: [
                             {"page_id": "p1", "url": "u1", "title": "策略",
                              "text": "红利逻辑\n高股息偏好"},
                         ])
@@ -121,11 +121,14 @@ def test_sync_source_embeds_and_stores(client, monkeypatch):
     try:
         src = NotionSource(notion_id="nid", title="策略", kind="page")
         db.add(src); db.commit(); db.refresh(src)
-        n = store.sync_source(db, src)
+        phases = []
+        n = store.sync_source(db, src, on_progress=lambda phase, **i: phases.append(phase))
         db.commit()
         assert n >= 1
         rows = db.query(KnowledgeChunk).filter_by(source_id=src.id).all()
         assert len(rows) == n
         assert src.last_synced_at is not None
+        # Progress is reported through the run: crawl → embed → store.
+        assert "embed" in phases and "store" in phases
     finally:
         db.close()

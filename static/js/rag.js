@@ -9,6 +9,9 @@
   const form = document.getElementById('rag-form');
   const input = document.getElementById('rag-input');
   const syncBtn = document.getElementById('rag-sync');
+  const progressEl = document.getElementById('rag-progress');
+  const progressText = progressEl.querySelector('.rag-progress-text');
+  const progressBar = progressEl.querySelector('.rag-progress-bar');
 
   function add(role, html) {
     const div = document.createElement('div');
@@ -66,14 +69,70 @@
     refreshStatus();
   });
 
+  function renderProgress(p) {
+    if (!p || p.phase === 'idle' || (!p.running && p.phase !== 'done')) {
+      progressEl.hidden = true;
+      return;
+    }
+    progressEl.hidden = false;
+    let text, pct;
+    if (p.phase === 'crawl') {
+      text = `抓取 Notion 页面…(已 ${p.pages} 页)`;
+      pct = null;  // unknown total during crawl → indeterminate
+    } else if (p.phase === 'embed') {
+      // Embedding is one batch call with no mid-progress, so show the片段 count
+      // with an indeterminate bar rather than a stuck 0%.
+      text = `本地向量化 ${p.embed_total} 个片段…`;
+      pct = null;
+    } else if (p.phase === 'store') {
+      text = '写入知识库…'; pct = 100;
+    } else if (p.phase === 'done') {
+      text = `同步完成,共 ${p.chunk_count} 个片段`; pct = 100;
+    } else {
+      text = '同步中…'; pct = null;
+    }
+    progressText.textContent = text;
+    progressBar.classList.toggle('indeterminate', pct === null);
+    progressBar.style.width = pct === null ? '100%' : pct + '%';
+  }
+
+  async function pollProgress() {
+    try {
+      const r = await fetch('/api/rag/sync/progress');
+      const p = await r.json();
+      renderProgress(p);
+      return p;
+    } catch (e) { return null; }
+  }
+
   syncBtn.addEventListener('click', async () => {
     syncBtn.disabled = true; syncBtn.textContent = '同步中…';
+    // Poll progress while the (blocking) sync request runs in the background.
+    let polling = true;
+    const loop = (async () => {
+      while (polling) {
+        const p = await pollProgress();
+        if (p && !p.running && p.phase !== 'crawl') break;
+        await new Promise(res => setTimeout(res, 600));
+      }
+    })();
     try {
       const r = await fetch('/api/rag/sync', { method: 'POST' });
       const data = await r.json();
-      add('bot', r.ok ? `<em>同步完成,共 ${data.chunk_count} 个片段。</em>`
-                      : `<em>${esc(data.detail || '同步失败')}</em>`);
-    } catch (e) { add('bot', '<em>同步失败</em>'); }
+      polling = false; await loop;
+      if (r.ok) {
+        renderProgress({ phase: 'done', chunk_count: data.chunk_count });
+        add('bot', `<em>同步完成,共 ${data.chunk_count} 个片段。</em>`);
+      } else {
+        progressEl.hidden = true;
+        add('bot', `<em>${esc(data.detail || '同步失败')}</em>`);
+      }
+    } catch (e) {
+      polling = false; progressEl.hidden = true;
+      add('bot', '<em>同步失败</em>');
+    }
+    // Leave the "done" bar visible briefly, then tuck it away.
+    setTimeout(() => { progressEl.hidden = true; }, 3000);
     syncBtn.disabled = false; syncBtn.textContent = '同步';
     refreshStatus();
   });

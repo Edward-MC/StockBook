@@ -87,13 +87,24 @@ def chunk_count(db: Session) -> int:
     return db.query(KnowledgeChunk).count()
 
 
-def sync_source(db: Session, source: NotionSource) -> int:
+def sync_source(db: Session, source: NotionSource, on_progress=None) -> int:
     """Crawl a Notion source, embed its pages' chunks, and replace stored
-    chunks for it (delete-and-rebuild). Returns chunk count. Caller commits."""
+    chunks for it (delete-and-rebuild). Returns chunk count. Caller commits.
+
+    `on_progress(phase, **info)` is called through the run with phase one of
+    "crawl" (info: pages), "embed" (info: done, total), "store" — so callers
+    can report sync progress."""
     import datetime as dt
     from . import embed, notion
 
-    pages = notion.crawl_source(source.notion_id, source.kind)
+    def _report(phase, **info):
+        if on_progress:
+            on_progress(phase, **info)
+
+    pages = notion.crawl_source(
+        source.notion_id, source.kind,
+        on_progress=lambda pages: _report("crawl", pages=pages),
+    )
     records = []
     for page in pages:
         for piece in notion.chunk_text(page["text"]):
@@ -101,9 +112,14 @@ def sync_source(db: Session, source: NotionSource) -> int:
                 "page_id": page["page_id"], "url": page["url"],
                 "title_path": page.get("title", ""), "text": piece,
             })
-    vectors = embed.embed_texts([r["text"] for r in records]) if records else []
-    for r, v in zip(records, vectors):
-        r["embedding"] = v
+    total = len(records)
+    if total:
+        _report("embed", done=0, total=total)
+        vectors = embed.embed_texts([r["text"] for r in records])
+        for r, v in zip(records, vectors):
+            r["embedding"] = v
+        _report("embed", done=total, total=total)
+    _report("store")
     n = replace_source_chunks(db, source, records)
     source.last_synced_at = dt.datetime.now()
     return n
