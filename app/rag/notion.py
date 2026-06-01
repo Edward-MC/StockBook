@@ -137,19 +137,69 @@ def page_title(page_id: str) -> str:
     return "(无标题)"
 
 
+# How deep to follow nested child pages before stopping (guards against
+# pathological trees / cycles). 5 levels is plenty for hand-organised notes.
+_MAX_DEPTH = 5
+
+
+def _child_refs(blocks: List[dict]) -> List[Dict[str, str]]:
+    """Extract nested child pages/databases from a page's blocks. Notion puts
+    a child page's title inline on the block, so we get it without an extra
+    API call. Returns [{id, kind, title}]."""
+    refs: List[Dict[str, str]] = []
+    for b in blocks or []:
+        bt = b.get("type")
+        if bt in ("child_page", "child_database"):
+            refs.append({
+                "id": b.get("id", ""),
+                "kind": "database" if bt == "child_database" else "page",
+                "title": (b.get(bt) or {}).get("title", "") or "(无标题)",
+            })
+    return refs
+
+
 def crawl_source(notion_id: str, kind: str) -> List[Dict[str, str]]:
-    """Yield {page_id, url, title, text} for every page under a source.
-    For a database, that's every row page; for a page, just itself."""
-    page_ids = fetch_database_page_ids(notion_id) if kind == "database" else [notion_id]
+    """Yield {page_id, url, title, text} for every page under a source,
+    recursing into nested child pages/databases (spec §14 enhancement).
+
+    `title` is a breadcrumb path ("父 / 子 / 孙") so citations locate the right
+    sub-page. A database expands to its row pages; a page yields its own text
+    plus everything beneath it. Pages with no prose of their own (pure
+    containers of child pages) contribute nothing themselves but are still
+    descended into.
+    """
     out: List[Dict[str, str]] = []
-    for pid in page_ids:
-        text = blocks_to_text(fetch_page_blocks(pid))
-        if not text.strip():
-            continue
-        out.append({
-            "page_id": pid,
-            "url": notion_page_url(pid),
-            "title": page_title(pid),
-            "text": text,
-        })
+    seen: set = set()  # guard against cycles / duplicate links
+
+    def walk_page(pid: str, title_path: str, depth: int) -> None:
+        if depth > _MAX_DEPTH or pid in seen:
+            return
+        seen.add(pid)
+        blocks = fetch_page_blocks(pid)
+        text = blocks_to_text(blocks)
+        if text.strip():
+            out.append({
+                "page_id": pid,
+                "url": notion_page_url(pid),
+                "title": title_path,
+                "text": text,
+            })
+        for ref in _child_refs(blocks):
+            child_path = f"{title_path} / {ref['title']}"
+            if ref["kind"] == "database":
+                walk_database(ref["id"], child_path, depth + 1)
+            else:
+                walk_page(ref["id"], child_path, depth + 1)
+
+    def walk_database(dbid: str, title_path: str, depth: int) -> None:
+        if depth > _MAX_DEPTH or dbid in seen:
+            return
+        seen.add(dbid)
+        for row_id in fetch_database_page_ids(dbid):
+            walk_page(row_id, f"{title_path} / {page_title(row_id)}", depth + 1)
+
+    if kind == "database":
+        walk_database(notion_id, page_title(notion_id), 0)
+    else:
+        walk_page(notion_id, page_title(notion_id), 0)
     return out
