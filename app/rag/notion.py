@@ -13,7 +13,7 @@ which dominates sync time).
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .. import config
 
@@ -112,18 +112,28 @@ def fetch_page_blocks(page_id: str) -> List[dict]:
     return blocks
 
 
-def fetch_database_page_ids(database_id: str) -> List[str]:
-    """Ids of all pages (rows) in a database (paginated)."""
+def _title_from_props(props: dict) -> str:
+    """Pull the title text out of a page's `properties` object."""
+    for prop in (props or {}).values():
+        if prop.get("type") == "title":
+            return _rich_text_to_str(prop.get("title", [])).strip() or "(无标题)"
+    return "(无标题)"
+
+
+def fetch_database_rows(database_id: str) -> List[Tuple[str, str]]:
+    """(page_id, title) for every row of a database (paginated). The title is
+    read from the query response itself — no extra per-row pages.retrieve."""
     client = _client()
-    ids: List[str] = []
+    rows: List[Tuple[str, str]] = []
     cursor = None
     while True:
         resp = client.databases.query(database_id=database_id, start_cursor=cursor)
-        ids.extend(p["id"] for p in resp.get("results", []))
+        for p in resp.get("results", []):
+            rows.append((p["id"], _title_from_props(p.get("properties", {}))))
         if not resp.get("has_more"):
             break
         cursor = resp.get("next_cursor")
-    return ids
+    return rows
 
 
 def page_title(page_id: str) -> str:
@@ -131,10 +141,7 @@ def page_title(page_id: str) -> str:
     try:
         client = _client()
         page = client.pages.retrieve(page_id=page_id)
-        props = page.get("properties", {})
-        for prop in props.values():
-            if prop.get("type") == "title":
-                return _rich_text_to_str(prop.get("title", [])).strip() or "(无标题)"
+        return _title_from_props(page.get("properties", {}))
     except Exception:
         pass
     return "(无标题)"
@@ -198,9 +205,10 @@ def crawl_source(notion_id: str, kind: str, on_progress=None) -> List[Dict[str, 
     scanned = 0
 
     def _expand_db(dbid: str, title_path: str) -> List[tuple]:
-        """A database → (row_page_id, breadcrumb) pairs for the next level."""
-        return [(row_id, f"{title_path} / {page_title(row_id)}")
-                for row_id in fetch_database_page_ids(dbid)]
+        """A database → (row_page_id, breadcrumb) pairs for the next level.
+        Row titles come from the database query response (no per-row API call)."""
+        return [(row_id, f"{title_path} / {row_title}")
+                for row_id, row_title in fetch_database_rows(dbid)]
 
     # Seed the first level: the source itself (a page, or each row of a db).
     root_title = page_title(notion_id)

@@ -27,8 +27,7 @@
 
   async function refreshStatus() {
     try {
-      const r = await fetch('/api/rag/status');
-      const s = await r.json();
+      const s = await api('GET', '/api/rag/status');
       if (!s.enabled) { fab.hidden = true; panel.hidden = true; return; }
       fab.hidden = false;
       statusEl.textContent =
@@ -50,12 +49,7 @@
     add('bot', '<em>思考中…</em>');
     const pending = log.lastChild;
     try {
-      const r = await fetch('/api/rag/ask', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: q }),
-      });
-      const data = await r.json();
-      if (!r.ok) { pending.innerHTML = '<em>' + esc(data.detail || '出错了') + '</em>'; return; }
+      const data = await api('POST', '/api/rag/ask', { question: q });
       let html = esc(data.answer).replace(/\n/g, '<br>');
       if (data.citations && data.citations.length) {
         html += '<div class="rag-cites">来源:';
@@ -65,7 +59,10 @@
         html += '</div>';
       }
       pending.innerHTML = html;
-    } catch (e) { pending.innerHTML = '<em>网络错误</em>'; }
+    } catch (e) {
+      // api() throws with a readable message (incl. FastAPI validation arrays).
+      pending.innerHTML = '<em>' + esc(e.message || '出错了') + '</em>';
+    }
     refreshStatus();
   });
 
@@ -98,8 +95,7 @@
 
   async function pollProgress(render = true) {
     try {
-      const r = await fetch('/api/rag/sync/progress');
-      const p = await r.json();
+      const p = await api('GET', '/api/rag/sync/progress');
       if (render) renderProgress(p);
       return p;
     } catch (e) { return null; }
@@ -124,22 +120,22 @@
       }
     })();
     try {
-      const r = await fetch('/api/rag/sync', { method: 'POST' });
-      const data = await r.json();
+      // /sync returns 200 with an `error` field on partial/total failure
+      // (so individual source failures don't 500); check it explicitly.
+      const data = await api('POST', '/api/rag/sync');
       polling = false; await loop;
-      if (r.ok) {
+      progressEl.hidden = true;
+      if (data.error) {
+        add('bot', `<em>同步未完成:${esc(data.error)}(现有 ${data.chunk_count} 个片段保留)</em>`);
+      } else {
         renderProgress({ phase: 'done', chunk_count: data.chunk_count });
         add('bot', `<em>同步完成,共 ${data.chunk_count} 个片段。</em>`);
-      } else {
-        progressEl.hidden = true;
-        add('bot', `<em>${esc(data.detail || '同步失败')}</em>`);
+        setTimeout(() => { progressEl.hidden = true; }, 3000);
       }
     } catch (e) {
       polling = false; progressEl.hidden = true;
-      add('bot', '<em>同步失败</em>');
+      add('bot', `<em>${esc(e.message || '同步失败')}</em>`);
     }
-    // Leave the "done" bar visible briefly, then tuck it away.
-    setTimeout(() => { progressEl.hidden = true; }, 3000);
     syncBtn.disabled = false; syncBtn.textContent = '同步';
     refreshStatus();
   });
