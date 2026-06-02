@@ -80,6 +80,7 @@ class BackupMeta:
     created_at: str      # ISO
     source_hash: str     # live DB bytes at backup time (change detection)
     integrity_ok: bool
+    encrypted: bool = False   # offsite copies encrypted with Fernet (spec 2026-06-02)
 
 
 # --------------------------------------------------------------------------- #

@@ -68,3 +68,8 @@ RAG_EMBED_MODEL = os.getenv("STOCKBOOK_RAG_EMBED_MODEL", "BAAI/bge-small-zh-v1.5
 BACKUP_DIR = os.getenv("STOCKBOOK_BACKUP_DIR", "")
 BACKUP_INTERVAL_HOURS = int(os.getenv("STOCKBOOK_BACKUP_INTERVAL_HOURS", "12"))
 BACKUP_KEEP = int(os.getenv("STOCKBOOK_BACKUP_KEEP", "30"))
+
+# Backup encryption (offsite only). Set this to encrypt the offsite/synced-folder
+# copy (Fernet + scrypt). Empty = offsite stays plaintext (a warning is logged).
+# Secret — .env only, never committed/logged.
+BACKUP_PASSPHRASE = os.getenv("STOCKBOOK_BACKUP_PASSPHRASE", "")
