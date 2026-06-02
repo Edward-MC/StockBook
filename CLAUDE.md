@@ -8,9 +8,12 @@
 
 ```bash
 source .venv/bin/activate          # 已有 venv,勿新建
+pip install -r requirements-dev.txt # 测试/覆盖率工具(连带运行时依赖)
 uvicorn main:app --reload          # 起服务(自动加载 .env)
 pytest                             # 全套测试
 pytest tests/test_calc.py -q       # 跑单个文件
+pytest --cov=app                   # 全套 + 覆盖率报告
+coverage report --include=app/calc.py,app/services.py --fail-under=95  # 核心覆盖率 gate(CI 同款)
 ```
 
 ## 硬性约定(YOU MUST)
