@@ -60,16 +60,13 @@ def test_salt_persists_same_key_decrypts(tmp_path):
     assert (d / "enc.json").read_text() == salt1
 
 
-def test_get_destinations_wraps_offsite_only_with_passphrase(tmp_path, monkeypatch):
+def test_get_destinations_always_wraps_offsite(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "BACKUP_DIR", str(tmp_path / "off"))
     monkeypatch.setattr(backup, "live_db_path", lambda: tmp_path / "live.db")
-    monkeypatch.setattr(config, "BACKUP_PASSPHRASE", "pw")
-    dests = backup.get_destinations()
-    assert dests[0].name == "local" and not getattr(dests[0], "encrypted", False)
-    assert dests[1].name == "offsite" and getattr(dests[1], "encrypted", False) is True
-    monkeypatch.setattr(config, "BACKUP_PASSPHRASE", "")
-    dests2 = backup.get_destinations()
-    assert getattr(dests2[1], "encrypted", False) is False
+    for pw in ("pw", ""):           # wrapped whether or not a passphrase is set
+        monkeypatch.setattr(config, "BACKUP_PASSPHRASE", pw)
+        dests = backup.get_destinations()
+        assert isinstance(dests[1], backup.EncryptedDestination)
 
 
 def test_wrong_passphrase_raises_and_cleans_temp(tmp_path):
@@ -85,14 +82,41 @@ def test_wrong_passphrase_raises_and_cleans_temp(tmp_path):
     assert not Path(str(out) + ".ct").exists()   # ciphertext temp cleaned even on failure
 
 
-def test_offsite_without_passphrase_logs_warning(tmp_path, monkeypatch, caplog):
+def test_offsite_plaintext_without_passphrase_merges_and_flags(tmp_path):
+    src = tmp_path / "live.db"; _make_sqlite(src, "v1")
+    enc = backup.EncryptedDestination(backup.LocalDirDestination(tmp_path / "off", "offsite"), "")
+    enc.store(src, _meta(src))
+    assert (tmp_path / "off" / "stockbook-x.db").exists()
+    assert not (tmp_path / "off" / "stockbook-x.db.enc").exists()
+    metas = enc.list()
+    assert [m.name for m in metas] == ["stockbook-x.db"]
+    assert metas[0].encrypted is False
+    out = tmp_path / "r.db"; enc.fetch("stockbook-x.db", out)
+    assert out.read_bytes() == src.read_bytes()
+
+
+def test_passphrase_removed_still_merges_one_row(tmp_path, monkeypatch):
+    live = tmp_path / "live.db"; _make_sqlite(live)
+    monkeypatch.setattr(backup, "live_db_path", lambda: live)
     monkeypatch.setattr(config, "BACKUP_DIR", str(tmp_path / "off"))
-    monkeypatch.setattr(backup, "live_db_path", lambda: tmp_path / "live.db")
+    monkeypatch.setattr(config, "BACKUP_PASSPHRASE", "pw")
+    backup.make_backup(force=True)
     monkeypatch.setattr(config, "BACKUP_PASSPHRASE", "")
-    with caplog.at_level(logging.WARNING):
-        dests = backup.get_destinations()
-    assert getattr(dests[1], "encrypted", False) is False
-    assert any("PLAINTEXT" in r.message for r in caplog.records)
+    offsite_names = [m.name for m in backup.get_destinations()[1].list()]
+    assert all(not n.endswith(".enc") for n in offsite_names)
+    assert offsite_names and all(m.encrypted for m in backup.get_destinations()[1].list())
+
+
+def test_encrypted_verify_no_passphrase_is_unavailable_not_mismatch(tmp_path, monkeypatch):
+    live = tmp_path / "live.db"; _make_sqlite(live)
+    monkeypatch.setattr(backup, "live_db_path", lambda: live)
+    monkeypatch.setattr(config, "BACKUP_DIR", str(tmp_path / "off"))
+    monkeypatch.setattr(config, "BACKUP_PASSPHRASE", "pw")
+    backup.make_backup(force=True)
+    name = backup.get_destinations()[1].list()[0].name
+    monkeypatch.setattr(config, "BACKUP_PASSPHRASE", "")
+    res = backup._verify_one(backup.get_destinations()[1], name, allow_pull=False)
+    assert res["status"] == "unavailable"
 
 
 def test_verify_encrypted_ok_tamper_wrongkey(tmp_path):

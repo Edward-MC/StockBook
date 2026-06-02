@@ -194,24 +194,31 @@ class LocalDirDestination:
 
 
 class EncryptedDestination:
-    """Decorator over an offsite LocalDirDestination: Fernet-encrypts each backup
-    on store, decrypts on fetch. Files land as '<name>.enc'; the inner manifest is
-    keyed by the .enc name but list() strips it back to the logical name, and
-    sha256 stays the PLAINTEXT hash (uniform with local). Salt + KDF params live in
-    enc.json so the folder is self-describing. Decryption always targets a LOCAL
-    temp (never the synced dir) so plaintext never lands in iCloud."""
-    encrypted = True
+    """Wraps the offsite LocalDirDestination. Encryption is PER-BACKUP, decided by
+    whether a passphrase is set at store time and recorded in meta.encrypted:
+      - passphrase set → store Fernet ciphertext as '<name>.enc' (encrypted=True)
+      - no passphrase  → store plaintext as '<name>'            (encrypted=False)
+    list() always reports the LOGICAL '<name>' (strips '.enc'), so rows always merge
+    with the local copy — no duplication regardless of passphrase state, and existing
+    '.enc' files need no migration. fetch()/verify()/restore key off each backup's
+    meta.encrypted; decryption targets caller-provided LOCAL paths and raises
+    ValueError when an encrypted backup is read without a passphrase. enc.json holds
+    salt/KDF params (atomic write)."""
 
     def __init__(self, inner: "LocalDirDestination", passphrase: str) -> None:
         self.inner = inner
         self.name = inner.name
         self._passphrase = passphrase
 
-    def _enc(self, name: str) -> str:
-        return name + ".enc"
-
-    def _strip(self, name: str) -> str:
+    def _logical(self, name: str) -> str:
         return name[:-4] if name.endswith(".enc") else name
+
+    def _meta(self, name: str) -> Optional[BackupMeta]:
+        return {m.name: m for m in self.list()}.get(name)
+
+    def _phys(self, name: str) -> str:
+        m = self._meta(name)
+        return name + ".enc" if (m is not None and m.encrypted) else name
 
     def _fernet(self):
         import base64
@@ -227,49 +234,60 @@ class EncryptedDestination:
             tmp_params = params.with_suffix(".json.tmp")
             tmp_params.write_text(json.dumps(
                 {"kdf": "scrypt", "salt": salt.hex(), "n": n, "r": r, "p": p}), "utf-8")
-            tmp_params.replace(params)   # atomic on POSIX — never leave a partial enc.json
+            tmp_params.replace(params)
         key = base64.urlsafe_b64encode(
             Scrypt(salt=salt, length=32, n=n, r=r, p=p).derive(self._passphrase.encode()))
         return Fernet(key)
 
     def store(self, src: Path, meta: BackupMeta) -> None:
         from dataclasses import replace
-        token = self._fernet().encrypt(Path(src).read_bytes())
-        self.inner.dir.mkdir(parents=True, exist_ok=True)
-        ct = self.inner.dir / f".enc-tmp-{os.getpid()}-{int(time.time()*1000)}"
-        try:  # write inside the try so a failed write never orphans a temp in the synced dir
-            ct.write_bytes(token)
-            self.inner.store(ct, replace(meta, name=self._enc(meta.name), encrypted=True))
-        finally:
-            if ct.exists():
-                ct.unlink()
+        if self._passphrase:
+            token = self._fernet().encrypt(Path(src).read_bytes())
+            self.inner.dir.mkdir(parents=True, exist_ok=True)
+            ct = self.inner.dir / f".enc-tmp-{os.getpid()}-{int(time.time()*1000)}"
+            try:
+                ct.write_bytes(token)
+                self.inner.store(ct, replace(meta, name=meta.name + ".enc", encrypted=True))
+            finally:
+                if ct.exists():
+                    ct.unlink()
+        else:
+            logging.getLogger(__name__).warning(
+                "offsite backup stored in PLAINTEXT (no STOCKBOOK_BACKUP_PASSPHRASE set)")
+            self.inner.store(src, replace(meta, encrypted=False))
 
     def list(self) -> List[BackupMeta]:
         from dataclasses import replace
-        return [replace(m, name=self._strip(m.name)) for m in self.inner.list()
-                if m.name.endswith(".enc")]  # only our .enc entries (a stray plaintext .db in the offsite dir is intentionally ignored)
+        return [replace(m, name=self._logical(m.name)) for m in self.inner.list()]
 
     def fetch(self, name: str, dest: Path) -> None:
-        """Decrypt <name>.enc into `dest` (caller must pass a LOCAL path)."""
-        ct = Path(str(dest) + ".ct")
-        try:  # finally wraps the whole body so a partial .ct never leaks on inner.fetch error
-            self.inner.fetch(self._enc(name), ct)
-            Path(dest).write_bytes(self._fernet().decrypt(ct.read_bytes()))
-        finally:
-            if ct.exists():
-                ct.unlink()
+        """Materialize backup `name` (logical) as plaintext into `dest` (a LOCAL path).
+        Encrypted backups are decrypted (needs the passphrase); plaintext ones copied."""
+        m = self._meta(name)
+        if m is not None and m.encrypted:
+            if not self._passphrase:
+                raise ValueError("需要 STOCKBOOK_BACKUP_PASSPHRASE 才能解密该异地备份")
+            ct = Path(str(dest) + ".ct")
+            try:
+                self.inner.fetch(name + ".enc", ct)
+                Path(dest).write_bytes(self._fernet().decrypt(ct.read_bytes()))
+            finally:
+                if ct.exists():
+                    ct.unlink()
+        else:
+            self.inner.fetch(name, dest)
 
     def prune(self, keep: int) -> List[str]:
-        return [self._strip(n) for n in self.inner.prune(keep)]
+        return [self._logical(n) for n in self.inner.prune(keep)]
 
     def path_of(self, name: str) -> Path:
-        return self.inner.path_of(self._enc(name))
+        return self.inner.path_of(self._phys(name))
 
     def is_local(self, name: str) -> bool:
-        return self.inner.is_local(self._enc(name))
+        return self.inner.is_local(self._phys(name))
 
     def ensure_materialized(self, name: str, timeout: float) -> bool:
-        return self.inner.ensure_materialized(self._enc(name), timeout)
+        return self.inner.ensure_materialized(self._phys(name), timeout)
 
 
 def _mtime_iso(p: Path) -> str:
@@ -278,8 +296,8 @@ def _mtime_iso(p: Path) -> str:
 
 def _verify_encrypted(dest: BackupDestination, name: str, meta: BackupMeta) -> dict:
     """Verify an encrypted backup by decrypting to a LOCAL temp then checking the
-    plaintext. Fernet authentication means tamper/wrong-key → InvalidToken →
-    mismatch (never a false ok). Plaintext temp is local + deleted immediately."""
+    plaintext. No passphrase → unavailable; tamper/wrong-key (InvalidToken) →
+    mismatch; transient read error → unavailable. Plaintext temp is local + deleted."""
     import tempfile
     from cryptography.fernet import InvalidToken
     fd, tmp_name = tempfile.mkstemp(prefix="sb-verify-", suffix=".db")
@@ -288,10 +306,13 @@ def _verify_encrypted(dest: BackupDestination, name: str, meta: BackupMeta) -> d
     try:
         try:
             dest.fetch(name, tmp)
+        except ValueError as e:
+            return {"file": name, "destination": dest.name,
+                    "status": "unavailable", "reason": str(e)}
         except InvalidToken:
             return {"file": name, "destination": dest.name, "status": "mismatch",
                     "reason": "解密失败:口令错误或文件损坏"}
-        except OSError as e:  # transient read/fetch error ≠ corruption → never a false mismatch
+        except OSError as e:
             return {"file": name, "destination": dest.name, "status": "unavailable",
                     "reason": "无法读取备份:%s" % e}
         ok = (tmp.exists() and tmp.stat().st_size == meta.size
@@ -306,8 +327,8 @@ def _verify_encrypted(dest: BackupDestination, name: str, meta: BackupMeta) -> d
 
 def _verify_one(dest: BackupDestination, name: str, *, allow_pull: bool,
                 timeout: float = _VERIFY_PULL_TIMEOUT_SECS) -> dict:
-    """Verify one backup. status ∈ {ok, mismatch, unavailable}. A pull/partial-
-    materialization failure is ALWAYS 'unavailable', never a false 'mismatch'."""
+    """Verify one backup. status ∈ {ok, mismatch, unavailable}. Branches on the
+    backup's own meta.encrypted (per-file), not the destination type."""
     meta = {m.name: m for m in dest.list()}.get(name)
     if meta is None or not meta.sha256:
         return {"file": name, "destination": dest.name,
@@ -316,10 +337,10 @@ def _verify_one(dest: BackupDestination, name: str, *, allow_pull: bool,
     if not materialized:
         return {"file": name, "destination": dest.name,
                 "status": "unavailable", "reason": "文件未物化(离线/驱逐)"}
-    if getattr(dest, "encrypted", False):
+    if meta.encrypted:
         return _verify_encrypted(dest, name, meta)
     p = dest.path_of(name)
-    if not p.exists() or p.stat().st_size != meta.size:  # partial → unavailable, not mismatch
+    if not p.exists() or p.stat().st_size != meta.size:
         return {"file": name, "destination": dest.name,
                 "status": "unavailable", "reason": "文件不完整"}
     ok = file_sha256(p) == meta.sha256 and _sqlite_integrity_check(p)
@@ -346,14 +367,8 @@ def get_destinations() -> List[BackupDestination]:
     backups_dir = live_db_path().parent / "backups"
     dests: List[BackupDestination] = [LocalDirDestination(backups_dir, "local")]
     if config.BACKUP_DIR:
-        offsite = LocalDirDestination(Path(config.BACKUP_DIR), "offsite")
-        if config.BACKUP_PASSPHRASE:
-            dests.append(EncryptedDestination(offsite, config.BACKUP_PASSPHRASE))
-        else:
-            logging.getLogger(__name__).warning(
-                "STOCKBOOK_BACKUP_DIR set but STOCKBOOK_BACKUP_PASSPHRASE empty — "
-                "offsite backups are PLAINTEXT. Set a passphrase to encrypt them.")
-            dests.append(offsite)
+        dests.append(EncryptedDestination(LocalDirDestination(Path(config.BACKUP_DIR), "offsite"),
+                                          config.BACKUP_PASSPHRASE))
     return dests
 
 
