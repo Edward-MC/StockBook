@@ -14,6 +14,8 @@ def _clean_rag_flags(monkeypatch):
     from app import config
     monkeypatch.setattr(config, "RAG_ENABLED", False)
     monkeypatch.setattr(config, "READONLY", False)
+    monkeypatch.setattr(config, "BACKUP_INTERVAL_HOURS", 0)  # no auto-backup in tests
+    monkeypatch.setattr(config, "BACKUP_DIR", "")            # local-only in tests
 
 
 @pytest.fixture()

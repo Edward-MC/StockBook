@@ -117,6 +117,7 @@ class TargetItem(BaseModel):
 
 class RestoreRequest(BaseModel):
     file: str = Field(..., min_length=1)
+    destination: Optional[str] = None
 
 
 class TargetsUpdate(BaseModel):

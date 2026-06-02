@@ -3,20 +3,18 @@ globally read-only (config.READONLY)."""
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-import sqlite3
-from pathlib import Path
-
 import httpx
 
-from .. import calc, config, quotes, schemas
+from .. import backup, calc, config, quotes, schemas
 from ..database import get_db
 from ..models import AssetClass, CashFlow, PriceQuote, Security, Transaction
-from ..seed import create_schema, reset_to_default
+from ..seed import reset_to_default
 from ..services import build_dashboard, build_ledger, get_primary_strategy, security_payload
 
 router = APIRouter(prefix="/api", tags=["api"])
@@ -502,77 +500,38 @@ def mark_rebalanced(db: Session = Depends(get_db)):
 # --------------------------------------------------------------------------- #
 # Backup (snapshot the SQLite file into <db-dir>/backups/)
 # --------------------------------------------------------------------------- #
-def _db_path(db: Session) -> Path:
-    url = db.get_bind().url
-    if url.get_backend_name() != "sqlite" or not url.database:
-        raise HTTPException(status_code=400, detail="仅支持 SQLite 数据库备份")
-    return Path(url.database)
-
-
-def _sqlite_snapshot(src_path: Path, dest_path: Path) -> None:
-    """Consistent DB copy via SQLite's online backup API (handles concurrent
-    writers and WAL — unlike a raw file copy)."""
-    source = sqlite3.connect(str(src_path))
-    try:
-        target = sqlite3.connect(str(dest_path))
-        try:
-            source.backup(target)
-        finally:
-            target.close()
-    finally:
-        source.close()
-
-
-def _make_backup(db: Session) -> dict:
-    src = _db_path(db)
-    backup_dir = src.parent / "backups"
-    backup_dir.mkdir(exist_ok=True)
-    base = f"stockbook-{datetime.now():%Y%m%d-%H%M%S}"
-    dest = backup_dir / f"{base}.db"
-    i = 2
-    while dest.exists():  # avoid clobbering a same-second backup (e.g. reset/restore)
-        dest = backup_dir / f"{base}-{i}.db"
-        i += 1
-    _sqlite_snapshot(src, dest)
-    return {"file": dest.name, "size": dest.stat().st_size, "dir": str(backup_dir)}
-
-
 @router.post("/backup", dependencies=[Depends(require_writable)])
-def backup(db: Session = Depends(get_db)):
-    return _make_backup(db)
+def backup_now():
+    return backup.make_backup(force=True)
 
 
 @router.get("/backups")
-def list_backups(db: Session = Depends(get_db)):
-    backup_dir = _db_path(db).parent / "backups"
-    if not backup_dir.exists():
-        return []
-    files = sorted(backup_dir.glob("*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
-    return [{"file": p.name, "size": p.stat().st_size,
-             "modified": datetime.fromtimestamp(p.stat().st_mtime).isoformat()} for p in files]
+def list_backups():
+    out = []
+    seen = {}
+    for d in backup.get_destinations():
+        for m in d.list():
+            row = seen.get(m.name)
+            if row is None:
+                row = {"file": m.name, "size": m.size, "modified": m.created_at,
+                       "integrity_ok": m.integrity_ok, "destinations": []}
+                seen[m.name] = row
+                out.append(row)
+            row["destinations"].append(d.name)
+    return out
+
+
+@router.post("/backup/verify", dependencies=[Depends(require_writable)])
+def verify_backups(file: Optional[str] = Query(None), destination: Optional[str] = Query(None)):
+    return backup.verify(name=file, destination=destination, allow_pull=True)
 
 
 @router.post("/restore", dependencies=[Depends(require_writable)])
-def restore(payload: schemas.RestoreRequest, db: Session = Depends(get_db)):
-    db_file = _db_path(db)
-    backup_dir = db_file.parent / "backups"
-    # Basename only — guard against path traversal.
-    src = backup_dir / Path(payload.file).name
-    if src.suffix != ".db" or not src.exists():
-        raise HTTPException(status_code=404, detail="备份文件不存在")
-    # Snapshot the current state first, so a restore is itself reversible.
+def restore(payload: schemas.RestoreRequest):
     try:
-        _make_backup(db)
-    except Exception:
-        pass
-    # Release all engine connections, then copy the backup's contents into the
-    # live DB via the backup API (page-level, consistent — no half-written file).
-    bind = db.get_bind()
-    db.close()
-    bind.dispose()
-    _sqlite_snapshot(src, db_file)
-    create_schema()  # additive migrations in case an older backup is restored
-    return {"ok": True, "restored": src.name}
+        return backup.restore_backup(payload.file, getattr(payload, "destination", None))
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="备份文件不存在")
 
 
 # --------------------------------------------------------------------------- #
@@ -581,8 +540,8 @@ def restore(payload: schemas.RestoreRequest, db: Session = Depends(get_db)):
 @router.post("/reset", dependencies=[Depends(require_writable)])
 def reset(db: Session = Depends(get_db)):
     try:
-        _make_backup(db)
+        backup.make_backup(force=True)
     except Exception:
-        pass  # best-effort; never block a reset on backup failure
+        pass
     reset_to_default(db)
     return {"ok": True}

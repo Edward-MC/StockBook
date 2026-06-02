@@ -4,12 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from app import backup
+from app import backup, config
 
 
 def _make_sqlite(path: Path, value: str = "hello") -> None:
     con = sqlite3.connect(str(path))
-    con.execute("CREATE TABLE t (v TEXT)")
+    con.execute("CREATE TABLE IF NOT EXISTS t (v TEXT)")
     con.execute("INSERT INTO t VALUES (?)", (value,))
     con.commit()
     con.close()
@@ -60,3 +60,79 @@ def test_localdir_store_list_roundtrip_and_prune(tmp_path):
     assert deleted == ["stockbook-20260100.db"]  # oldest by created_at
     assert {m.name for m in d.list()} == {"stockbook-20260101.db", "stockbook-20260102.db"}
     assert not (tmp_path / "backups" / "stockbook-20260100.db").exists()
+
+
+class FakeDestination:
+    """In-memory destination with selectable materialization state."""
+    def __init__(self, name="fake", materialized=True):
+        self.name = name
+        self.metas = {}
+        self.blobs = {}
+        self._materialized = materialized
+
+    def store(self, src, meta):
+        self.blobs[meta.name] = Path(src).read_bytes()
+        self.metas[meta.name] = meta
+
+    def list(self):
+        return sorted(self.metas.values(), key=lambda m: m.created_at, reverse=True)
+
+    def fetch(self, name, dest):
+        Path(dest).write_bytes(self.blobs[name])
+
+    def prune(self, keep):
+        doomed = [m.name for m in self.list()[keep:]]
+        for n in doomed:
+            self.metas.pop(n, None)
+            self.blobs.pop(n, None)
+        return doomed
+
+    def path_of(self, name):
+        return Path("/in-memory") / name
+
+    def is_local(self, name):
+        return self._materialized
+
+    def ensure_materialized(self, name, timeout):
+        return self._materialized
+
+
+def test_make_backup_writes_all_destinations(tmp_path, monkeypatch):
+    live = tmp_path / "live.db"
+    _make_sqlite(live, "v1")
+    monkeypatch.setattr(backup, "live_db_path", lambda: live)
+    d1 = backup.LocalDirDestination(tmp_path / "b1", "local")
+    d2 = FakeDestination("offsite")
+    monkeypatch.setattr(backup, "get_destinations", lambda: [d1, d2])
+    res = backup.make_backup(force=True)
+    assert res["skipped"] is False
+    assert len(d1.list()) == 1 and len(d2.list()) == 1
+    assert res["verified"]["local"] == "ok"
+
+
+def test_make_backup_change_detection_skips_unchanged(tmp_path, monkeypatch):
+    live = tmp_path / "live.db"
+    _make_sqlite(live, "v1")
+    monkeypatch.setattr(backup, "live_db_path", lambda: live)
+    d1 = backup.LocalDirDestination(tmp_path / "b1", "local")
+    monkeypatch.setattr(backup, "get_destinations", lambda: [d1])
+    backup.make_backup(force=True)
+    res2 = backup.make_backup(force=False)          # unchanged → skip
+    assert res2["skipped"] is True
+    assert len(d1.list()) == 1
+    _make_sqlite(live, "v2")                          # change → no skip
+    res3 = backup.make_backup(force=False)
+    assert res3["skipped"] is False and len(d1.list()) == 2
+
+
+def test_make_backup_prunes_to_keep(tmp_path, monkeypatch):
+    live = tmp_path / "live.db"
+    _make_sqlite(live)
+    monkeypatch.setattr(backup, "live_db_path", lambda: live)
+    d1 = backup.LocalDirDestination(tmp_path / "b1", "local")
+    monkeypatch.setattr(backup, "get_destinations", lambda: [d1])
+    monkeypatch.setattr(config, "BACKUP_KEEP", 3)
+    for i in range(5):
+        _make_sqlite(live, f"v{i}")  # change each time so it isn't skipped
+        backup.make_backup(force=True)
+    assert len(d1.list()) == 3
