@@ -103,7 +103,7 @@ function _bkSummary(list) {
   const offsiteLabel = hasOffsite
     ? '<span>异地:<strong>已配置</strong></span>'
     : '<span>异地:<span style="color:var(--ink-3)">未配置</span></span>';
-  return `<div class="bk-info"><span>上次自动备份:${ts}</span>${offsiteLabel}</div>`;
+  return `<div class="bk-info"><span>上次备份:${ts}</span>${offsiteLabel}</div>`;
 }
 
 async function openBackupModal() {

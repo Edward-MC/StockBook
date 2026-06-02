@@ -154,5 +154,10 @@ def test_verify_tristate(tmp_path):
     fake = FakeDestination("offsite", materialized=False)
     fake.store(src, meta)
     assert backup._verify_one(fake, "stockbook-x.db", allow_pull=True)["status"] == "unavailable"
+    # unavailable — auto-verify (allow_pull=False) on an unmaterialized file: no download triggered
+    assert backup._verify_one(fake, "stockbook-x.db", allow_pull=False)["status"] == "unavailable"
+    # unavailable — partial materialization (size < recorded): never a false mismatch
+    p.write_bytes(b"\x01" * (meta.size - 1))
+    assert backup._verify_one(d, "stockbook-x.db", allow_pull=False)["status"] == "unavailable"
     # unavailable — no manifest entry
     assert backup._verify_one(d, "nope.db", allow_pull=False)["status"] == "unavailable"
