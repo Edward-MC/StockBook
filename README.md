@@ -67,6 +67,7 @@ app/
   models.py        领域模型(Strategy/AssetClass/Security/Transaction/PriceQuote/CashFlow + RAG 两表)
   calc.py          纯计算引擎(持仓/占比/偏离/再平衡/未分配池)— 无框架依赖,易测
   services.py      ORM → 计算引擎 → 仪表盘 / 总账载荷
+  backup.py        备份引擎:校验 + 异地 + 调度/CLI(`python -m app.backup` 手动跑一次)
   quotes.py        实时行情(QuoteSource 接口 + 多源注册表 + failover,解析与网络分离)
   schemas.py       Pydantic 校验
   seed.py          建库 + 示例数据 + 轻量加列迁移 + 重置
@@ -87,6 +88,11 @@ docs/architecture.md   技术选型、架构分层、关键决策、功能日志
 - `STOCKBOOK_HIDE_AMOUNTS=1` — 全局隐藏金额
 - `STOCKBOOK_AUTO_REFRESH=0` — 关闭打开页面时自动拉取实时行情
 - `STOCKBOOK_QUOTE_SOURCES` — 行情源 failover 顺序,默认 `tencent,sina,eastmoney`
+
+**备份**
+- `STOCKBOOK_BACKUP_DIR` — 异地/同步盘备份目录(如 iCloud/坚果云路径);留空=仅本地
+- `STOCKBOOK_BACKUP_INTERVAL_HOURS` — 自动备份间隔小时(默认 `12`;设 `0` 关闭自动备份)
+- `STOCKBOOK_BACKUP_KEEP` — 每个目标保留的最新备份份数(默认 `30`)
 
 **RAG 问答**
 - `STOCKBOOK_RAG_ENABLED=1` — 启用问答功能(默认关)
