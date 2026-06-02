@@ -99,10 +99,14 @@ function _bkSummary(list) {
   if (!list.length) return "";
   const newest = list.reduce((a, b) => (a.modified > b.modified ? a : b));
   const ts = newest.modified.slice(0, 19).replace("T", " ");
-  const hasOffsite = list.some(b => (b.destinations || []).includes("offsite"));
-  const hasEnc = list.some(b => b.encrypted);
+  const offsite = list.filter(b => (b.destinations || []).includes("offsite"));
+  const hasOffsite = offsite.length > 0;
+  // Current posture = whether the MOST-RECENT offsite backup is encrypted. The folder
+  // can hold a mix (old encrypted + new plaintext after a passphrase is removed), so
+  // "any backup encrypted" would wrongly keep showing 已加密 with no passphrase set.
+  const encNow = hasOffsite && offsite.reduce((a, b) => (a.modified > b.modified ? a : b)).encrypted;
   let offsiteLabel;
-  if (hasOffsite && hasEnc) {
+  if (hasOffsite && encNow) {
     offsiteLabel = '<span>异地:<strong>已加密</strong> 🔒</span>';
   } else if (hasOffsite) {
     offsiteLabel = '<span>异地:<strong>已配置</strong><span style="color:var(--accent);margin-left:2px" title="异地副本未加密">⚠</span><span style="color:var(--ink-3)">(未加密)</span></span>';
