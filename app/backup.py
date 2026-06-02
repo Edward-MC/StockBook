@@ -237,8 +237,8 @@ class EncryptedDestination:
         token = self._fernet().encrypt(Path(src).read_bytes())
         self.inner.dir.mkdir(parents=True, exist_ok=True)
         ct = self.inner.dir / f".enc-tmp-{os.getpid()}-{int(time.time()*1000)}"
-        ct.write_bytes(token)
-        try:
+        try:  # write inside the try so a failed write never orphans a temp in the synced dir
+            ct.write_bytes(token)
             self.inner.store(ct, replace(meta, name=self._enc(meta.name), encrypted=True))
         finally:
             if ct.exists():
@@ -453,6 +453,14 @@ def restore_backup(name: str, destination: Optional[str] = None) -> dict:
         if artifact.exists():
             artifact.unlink()
         raise ValueError("解密失败:口令错误或备份损坏")
+    # Safety net: never clobber the live DB with a non-SQLite artifact. Catches an
+    # encrypted backup fetched without a passphrase (offsite reverted to plaintext),
+    # a corrupt/truncated backup, etc. — abort cleanly, live DB untouched.
+    if not _sqlite_integrity_check(artifact):
+        if artifact.exists():
+            artifact.unlink()
+        raise ValueError("备份无法恢复:不是有效的 SQLite 库"
+                         "(可能是加密备份但未配置/口令错误,或文件损坏)")
     try:
         database.engine.dispose()          # release connections before overwrite
         _sqlite_restore(artifact, live)

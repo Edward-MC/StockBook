@@ -148,3 +148,21 @@ def test_verify_encrypted_read_error_is_unavailable(tmp_path, monkeypatch):
     monkeypatch.setattr(enc, "fetch", boom)
     res = backup._verify_one(enc, "stockbook-x.db", allow_pull=False)
     assert res["status"] == "unavailable"
+
+
+def test_restore_encrypted_without_passphrase_aborts_cleanly(tmp_path, monkeypatch):
+    # Passphrase removed after encrypting: offsite reverts to a plaintext dest over
+    # .enc files. Restoring one must NOT feed ciphertext into the live DB — the
+    # artifact integrity check aborts cleanly with the live DB untouched.
+    import pytest
+    live = tmp_path / "live.db"; _make_sqlite(live, "orig")
+    monkeypatch.setattr(backup, "live_db_path", lambda: live)
+    monkeypatch.setattr(config, "BACKUP_DIR", str(tmp_path / "off"))
+    monkeypatch.setattr(config, "BACKUP_PASSPHRASE", "pw")
+    backup.make_backup(force=True)                       # encrypted offsite written
+    before = live.read_bytes()
+    monkeypatch.setattr(config, "BACKUP_PASSPHRASE", "")  # passphrase removed
+    enc_name = backup.get_destinations()[1].list()[0].name   # the .enc entry, now a plain dest
+    with pytest.raises(ValueError):
+        backup.restore_backup(enc_name, "offsite")
+    assert live.read_bytes() == before                   # live DB untouched
