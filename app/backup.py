@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import shutil
 import sqlite3
@@ -192,6 +193,85 @@ class LocalDirDestination:
         return self.is_local(name)
 
 
+class EncryptedDestination:
+    """Decorator over an offsite LocalDirDestination: Fernet-encrypts each backup
+    on store, decrypts on fetch. Files land as '<name>.enc'; the inner manifest is
+    keyed by the .enc name but list() strips it back to the logical name, and
+    sha256 stays the PLAINTEXT hash (uniform with local). Salt + KDF params live in
+    enc.json so the folder is self-describing. Decryption always targets a LOCAL
+    temp (never the synced dir) so plaintext never lands in iCloud."""
+    encrypted = True
+
+    def __init__(self, inner: "LocalDirDestination", passphrase: str) -> None:
+        self.inner = inner
+        self.name = inner.name
+        self._passphrase = passphrase
+
+    def _enc(self, name: str) -> str:
+        return name + ".enc"
+
+    def _strip(self, name: str) -> str:
+        return name[:-4] if name.endswith(".enc") else name
+
+    def _fernet(self):
+        import base64
+        from cryptography.fernet import Fernet
+        from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+        params = self.inner.dir / "enc.json"
+        if params.exists():
+            d = json.loads(params.read_text("utf-8"))
+            salt, n, r, p = bytes.fromhex(d["salt"]), d["n"], d["r"], d["p"]
+        else:
+            salt, n, r, p = os.urandom(16), 16384, 8, 1
+            self.inner.dir.mkdir(parents=True, exist_ok=True)
+            tmp_params = params.with_suffix(".json.tmp")
+            tmp_params.write_text(json.dumps(
+                {"kdf": "scrypt", "salt": salt.hex(), "n": n, "r": r, "p": p}), "utf-8")
+            tmp_params.replace(params)   # atomic on POSIX — never leave a partial enc.json
+        key = base64.urlsafe_b64encode(
+            Scrypt(salt=salt, length=32, n=n, r=r, p=p).derive(self._passphrase.encode()))
+        return Fernet(key)
+
+    def store(self, src: Path, meta: BackupMeta) -> None:
+        from dataclasses import replace
+        token = self._fernet().encrypt(Path(src).read_bytes())
+        self.inner.dir.mkdir(parents=True, exist_ok=True)
+        ct = self.inner.dir / f".enc-tmp-{os.getpid()}-{int(time.time()*1000)}"
+        ct.write_bytes(token)
+        try:
+            self.inner.store(ct, replace(meta, name=self._enc(meta.name), encrypted=True))
+        finally:
+            if ct.exists():
+                ct.unlink()
+
+    def list(self) -> List[BackupMeta]:
+        from dataclasses import replace
+        return [replace(m, name=self._strip(m.name)) for m in self.inner.list()
+                if m.name.endswith(".enc")]  # only our .enc entries (a stray plaintext .db in the offsite dir is intentionally ignored)
+
+    def fetch(self, name: str, dest: Path) -> None:
+        """Decrypt <name>.enc into `dest` (caller must pass a LOCAL path)."""
+        ct = Path(str(dest) + ".ct")
+        self.inner.fetch(self._enc(name), ct)
+        try:
+            Path(dest).write_bytes(self._fernet().decrypt(ct.read_bytes()))
+        finally:
+            if ct.exists():
+                ct.unlink()
+
+    def prune(self, keep: int) -> List[str]:
+        return [self._strip(n) for n in self.inner.prune(keep)]
+
+    def path_of(self, name: str) -> Path:
+        return self.inner.path_of(self._enc(name))
+
+    def is_local(self, name: str) -> bool:
+        return self.inner.is_local(self._enc(name))
+
+    def ensure_materialized(self, name: str, timeout: float) -> bool:
+        return self.inner.ensure_materialized(self._enc(name), timeout)
+
+
 def _mtime_iso(p: Path) -> str:
     return datetime.fromtimestamp(p.stat().st_mtime).isoformat()
 
@@ -236,7 +316,14 @@ def get_destinations() -> List[BackupDestination]:
     backups_dir = live_db_path().parent / "backups"
     dests: List[BackupDestination] = [LocalDirDestination(backups_dir, "local")]
     if config.BACKUP_DIR:
-        dests.append(LocalDirDestination(Path(config.BACKUP_DIR), "offsite"))
+        offsite = LocalDirDestination(Path(config.BACKUP_DIR), "offsite")
+        if config.BACKUP_PASSPHRASE:
+            dests.append(EncryptedDestination(offsite, config.BACKUP_PASSPHRASE))
+        else:
+            logging.getLogger(__name__).warning(
+                "STOCKBOOK_BACKUP_DIR set but STOCKBOOK_BACKUP_PASSPHRASE empty — "
+                "offsite backups are PLAINTEXT. Set a passphrase to encrypt them.")
+            dests.append(offsite)
     return dests
 
 
@@ -283,7 +370,10 @@ def make_backup(*, force: bool = False) -> dict:
         if tmp.exists():
             tmp.unlink()
 
-    verified = {d.name: _verify_one(d, meta.name, allow_pull=False)["status"] for d in dests}
+    # Encrypted destinations are verified via decrypt-then-check (added next task);
+    # skip them here so a perfectly-written encrypted offsite isn't falsely "unavailable".
+    verified = {d.name: _verify_one(d, meta.name, allow_pull=False)["status"]
+                for d in dests if not getattr(d, "encrypted", False)}
     return {"skipped": False, "written": [d.name for d in dests],
             "file": meta.name, "verified": verified}
 
