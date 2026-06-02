@@ -452,3 +452,29 @@ def test_sell_realized_pnl_in_ledger(client):
     # the buy and its sell share a pairing group number
     b = next(e for e in entries if e["kind"] == "buy" and e["id"] == buy["id"])
     assert s["group"] is not None and s["group"] == b["group"]
+
+
+def test_verify_endpoint_reports_ok(client):
+    client.post("/api/backup")
+    res = client.post("/api/backup/verify").json()
+    assert res and all(r["status"] == "ok" for r in res)
+
+
+def test_verify_endpoint_detects_mismatch(client, tmp_path):
+    client.post("/api/backup")
+    f = client.get("/api/backups").json()[0]["file"]
+    # tamper the on-disk backup, preserving size (live DB is tmp_path/test.db → backups under tmp_path)
+    bad = tmp_path / "backups" / f
+    bad.write_bytes(b"x" * bad.stat().st_size)
+    res = client.post("/api/backup/verify", params={"file": f}).json()
+    assert any(r["status"] == "mismatch" for r in res)
+
+
+def test_restore_from_offsite(client, tmp_path, monkeypatch):
+    from app import config
+    offsite = tmp_path / "offsite"
+    monkeypatch.setattr(config, "BACKUP_DIR", str(offsite))
+    client.post("/api/backup")                       # writes local + offsite
+    f = client.get("/api/backups").json()[0]["file"]
+    r = client.post("/api/restore", json={"file": f, "destination": "offsite"})
+    assert r.json()["ok"] is True

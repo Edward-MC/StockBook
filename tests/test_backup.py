@@ -136,3 +136,23 @@ def test_make_backup_prunes_to_keep(tmp_path, monkeypatch):
         _make_sqlite(live, f"v{i}")  # change each time so it isn't skipped
         backup.make_backup(force=True)
     assert len(d1.list()) == 3
+
+
+def test_verify_tristate(tmp_path):
+    d = backup.LocalDirDestination(tmp_path / "b", "local")
+    src = tmp_path / "a.db"; _make_sqlite(src)
+    meta = backup.BackupMeta("stockbook-x.db", backup.file_sha256(src), src.stat().st_size,
+                             "2026-01-01T00:00:00", "h", True)
+    d.store(src, meta)
+    # ok — stored file is an intact copy
+    assert backup._verify_one(d, "stockbook-x.db", allow_pull=False)["status"] == "ok"
+    # mismatch — SAME size but tampered content on a fully-present file
+    p = d.path_of("stockbook-x.db")
+    p.write_bytes(b"\x00" * meta.size)
+    assert backup._verify_one(d, "stockbook-x.db", allow_pull=False)["status"] == "mismatch"
+    # unavailable — not materialized & cannot pull
+    fake = FakeDestination("offsite", materialized=False)
+    fake.store(src, meta)
+    assert backup._verify_one(fake, "stockbook-x.db", allow_pull=True)["status"] == "unavailable"
+    # unavailable — no manifest entry
+    assert backup._verify_one(d, "nope.db", allow_pull=False)["status"] == "unavailable"
