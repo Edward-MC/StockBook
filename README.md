@@ -51,11 +51,13 @@ ANTHROPIC_API_KEY=...       # Claude API key
 ## 测试
 
 ```bash
+pip install -r requirements-dev.txt   # 测试/覆盖率工具(连带运行时依赖)
 pytest                       # 全套
 pytest tests/test_calc.py    # 单个文件
+pytest --cov=app             # 带覆盖率
 ```
 
-测试用每例独立的临时 SQLite,绝不触碰你的 `stockbook.db`。
+测试用每例独立的临时 SQLite,绝不触碰你的 `stockbook.db`。纯计算引擎 `calc.py` 另有 **Hypothesis 不变量测试**(占比/再平衡/批次配对等性质);**GitHub Actions** 在 PR 上跑全套 + 核心模块覆盖率门槛(95%)。
 
 ## 结构
 
@@ -75,7 +77,9 @@ app/
                    · snapshot.py(持仓快照)· ask.py(prompt+Claude)· limiter.py(限流)
 templates/         base.html(外壳)· index.html(单页 + 页内 tab)· _rag_widget.html(问答小窗)
 static/            css/style.css · js/(common.js · app.js · rag.js)— 原生 JS,fetch 调 API
-tests/             test_calc.py · test_api.py · test_quotes.py · test_rag_*.py
+tests/             test_calc.py · test_calc_properties.py(Hypothesis 不变量)· test_api.py · test_quotes.py · test_rag_*.py
+.github/workflows/ci.yml   CI:pytest + 分层覆盖率门槛
+requirements-dev.txt · pyproject.toml   测试工具(独立于运行时依赖)+ coverage/pytest 配置
 docs/architecture.md   技术选型、架构分层、关键决策、功能日志
 ```
 
