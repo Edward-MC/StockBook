@@ -252,8 +252,8 @@ class EncryptedDestination:
     def fetch(self, name: str, dest: Path) -> None:
         """Decrypt <name>.enc into `dest` (caller must pass a LOCAL path)."""
         ct = Path(str(dest) + ".ct")
-        self.inner.fetch(self._enc(name), ct)
-        try:
+        try:  # finally wraps the whole body so a partial .ct never leaks on inner.fetch error
+            self.inner.fetch(self._enc(name), ct)
             Path(dest).write_bytes(self._fernet().decrypt(ct.read_bytes()))
         finally:
             if ct.exists():
@@ -276,6 +276,34 @@ def _mtime_iso(p: Path) -> str:
     return datetime.fromtimestamp(p.stat().st_mtime).isoformat()
 
 
+def _verify_encrypted(dest: BackupDestination, name: str, meta: BackupMeta) -> dict:
+    """Verify an encrypted backup by decrypting to a LOCAL temp then checking the
+    plaintext. Fernet authentication means tamper/wrong-key → InvalidToken →
+    mismatch (never a false ok). Plaintext temp is local + deleted immediately."""
+    import tempfile
+    from cryptography.fernet import InvalidToken
+    fd, tmp_name = tempfile.mkstemp(prefix="sb-verify-", suffix=".db")
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        try:
+            dest.fetch(name, tmp)
+        except InvalidToken:
+            return {"file": name, "destination": dest.name, "status": "mismatch",
+                    "reason": "解密失败:口令错误或文件损坏"}
+        except OSError as e:  # transient read/fetch error ≠ corruption → never a false mismatch
+            return {"file": name, "destination": dest.name, "status": "unavailable",
+                    "reason": "无法读取备份:%s" % e}
+        ok = (tmp.exists() and tmp.stat().st_size == meta.size
+              and file_sha256(tmp) == meta.sha256 and _sqlite_integrity_check(tmp))
+        return {"file": name, "destination": dest.name,
+                "status": "ok" if ok else "mismatch",
+                "reason": "" if ok else "解密后大小/哈希/完整性不符"}
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
 def _verify_one(dest: BackupDestination, name: str, *, allow_pull: bool,
                 timeout: float = _VERIFY_PULL_TIMEOUT_SECS) -> dict:
     """Verify one backup. status ∈ {ok, mismatch, unavailable}. A pull/partial-
@@ -288,6 +316,8 @@ def _verify_one(dest: BackupDestination, name: str, *, allow_pull: bool,
     if not materialized:
         return {"file": name, "destination": dest.name,
                 "status": "unavailable", "reason": "文件未物化(离线/驱逐)"}
+    if getattr(dest, "encrypted", False):
+        return _verify_encrypted(dest, name, meta)
     p = dest.path_of(name)
     if not p.exists() or p.stat().st_size != meta.size:  # partial → unavailable, not mismatch
         return {"file": name, "destination": dest.name,
@@ -370,10 +400,7 @@ def make_backup(*, force: bool = False) -> dict:
         if tmp.exists():
             tmp.unlink()
 
-    # Encrypted destinations are verified via decrypt-then-check (added next task);
-    # skip them here so a perfectly-written encrypted offsite isn't falsely "unavailable".
-    verified = {d.name: _verify_one(d, meta.name, allow_pull=False)["status"]
-                for d in dests if not getattr(d, "encrypted", False)}
+    verified = {d.name: _verify_one(d, meta.name, allow_pull=False)["status"] for d in dests}
     return {"skipped": False, "written": [d.name for d in dests],
             "file": meta.name, "verified": verified}
 
@@ -419,7 +446,13 @@ def restore_backup(name: str, destination: Optional[str] = None) -> dict:
     from .seed import create_schema
     artifact = live.parent / "backups" / f".restore-{os.getpid()}-{int(time.time()*1000)}.db"
     artifact.parent.mkdir(parents=True, exist_ok=True)
-    src_dest.fetch(name, artifact)
+    from cryptography.fernet import InvalidToken
+    try:
+        src_dest.fetch(name, artifact)
+    except InvalidToken:
+        if artifact.exists():
+            artifact.unlink()
+        raise ValueError("解密失败:口令错误或备份损坏")
     try:
         database.engine.dispose()          # release connections before overwrite
         _sqlite_restore(artifact, live)

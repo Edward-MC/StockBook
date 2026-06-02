@@ -93,3 +93,58 @@ def test_offsite_without_passphrase_logs_warning(tmp_path, monkeypatch, caplog):
         dests = backup.get_destinations()
     assert getattr(dests[1], "encrypted", False) is False
     assert any("PLAINTEXT" in r.message for r in caplog.records)
+
+
+def test_verify_encrypted_ok_tamper_wrongkey(tmp_path):
+    src = tmp_path / "live.db"; _make_sqlite(src)
+    d = tmp_path / "off"
+    enc = backup.EncryptedDestination(backup.LocalDirDestination(d, "offsite"), "pw")
+    enc.store(src, _meta(src))
+    # ok
+    assert backup._verify_one(enc, "stockbook-x.db", allow_pull=False)["status"] == "ok"
+    # tamper ciphertext → decrypt fails → mismatch (never a false ok)
+    f = d / "stockbook-x.db.enc"; b = bytearray(f.read_bytes()); b[-1] ^= 0x01; f.write_bytes(bytes(b))
+    assert backup._verify_one(enc, "stockbook-x.db", allow_pull=False)["status"] == "mismatch"
+    # wrong key → decrypt fails → mismatch (restore the good ciphertext first)
+    _make_sqlite(src); enc.store(src, _meta(src))
+    enc_wrong = backup.EncryptedDestination(backup.LocalDirDestination(d, "offsite"), "WRONG")
+    assert backup._verify_one(enc_wrong, "stockbook-x.db", allow_pull=False)["status"] == "mismatch"
+
+
+def test_restore_from_encrypted_offsite_and_wrongkey_aborts(tmp_path, monkeypatch):
+    import pytest
+    live = tmp_path / "live.db"; _make_sqlite(live, "orig")
+    monkeypatch.setattr(backup, "live_db_path", lambda: live)
+    monkeypatch.setattr(config, "BACKUP_DIR", str(tmp_path / "off"))
+    monkeypatch.setattr(config, "BACKUP_PASSPHRASE", "pw")
+    backup.make_backup(force=True)                       # writes encrypted offsite
+    name = backup.get_destinations()[1].list()[0].name
+    assert backup.restore_backup(name, "offsite")["ok"] is True
+    monkeypatch.setattr(config, "BACKUP_PASSPHRASE", "WRONG")
+    before = live.read_bytes()
+    with pytest.raises(ValueError):
+        backup.restore_backup(name, "offsite")
+    assert live.read_bytes() == before                   # not half-restored
+
+
+def test_api_backups_exposes_encrypted_flag(client, tmp_path, monkeypatch):
+    from app import config as cfg
+    monkeypatch.setattr(cfg, "BACKUP_DIR", str(tmp_path / "off"))
+    monkeypatch.setattr(cfg, "BACKUP_PASSPHRASE", "pw")
+    client.post("/api/backup")
+    rows = client.get("/api/backups").json()
+    assert any(r.get("encrypted") for r in rows)
+
+
+def test_verify_encrypted_read_error_is_unavailable(tmp_path, monkeypatch):
+    # A transient read/fetch failure (file present per is_local, but fetch errors)
+    # must be 'unavailable', never a false 'mismatch'.
+    src = tmp_path / "live.db"; _make_sqlite(src)
+    enc = backup.EncryptedDestination(backup.LocalDirDestination(tmp_path / "off", "offsite"), "pw")
+    enc.store(src, _meta(src))
+
+    def boom(name, dest):
+        raise OSError("simulated read failure")
+    monkeypatch.setattr(enc, "fetch", boom)
+    res = backup._verify_one(enc, "stockbook-x.db", allow_pull=False)
+    assert res["status"] == "unavailable"
