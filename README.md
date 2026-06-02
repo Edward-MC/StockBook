@@ -67,11 +67,11 @@ app/
   models.py        领域模型(Strategy/AssetClass/Security/Transaction/PriceQuote/CashFlow + RAG 两表)
   calc.py          纯计算引擎(持仓/占比/偏离/再平衡/未分配池)— 无框架依赖,易测
   services.py      ORM → 计算引擎 → 仪表盘 / 总账载荷
-  quotes.py        实时行情(多源 failover,解析与网络分离)
+  quotes.py        实时行情(QuoteSource 接口 + 多源注册表 + failover,解析与网络分离)
   schemas.py       Pydantic 校验
   seed.py          建库 + 示例数据 + 轻量加列迁移 + 重置
   routers/         api.py(JSON API)· pages.py(页面)· rag.py(RAG 问答 API)
-  rag/             notion.py(抓取/解析)· embed.py(向量化)· store.py(检索/入库)
+  rag/             notion.py(抓取/解析)· embed.py(向量化,Embedder 接口)· store.py(检索/入库,Retriever 接口)
                    · snapshot.py(持仓快照)· ask.py(prompt+Claude)· limiter.py(限流)
 templates/         base.html(外壳)· index.html(单页 + 页内 tab)· _rag_widget.html(问答小窗)
 static/            css/style.css · js/(common.js · app.js · rag.js)— 原生 JS,fetch 调 API
