@@ -32,6 +32,7 @@
 
 **非目标(本轮)**
 - 加密(at-rest / 上传前);S3/rsync 等远端实现;GFS 分层保留;KMS;多机一致性。均留扩展点,不实现。
+- **换库可移植**(把 SQLite 耦合抽成 `BackupSource` 接口)——**只标接缝、不实现**,理由与迁移路径见 §13。
 
 ## 3. 架构总览
 
@@ -120,15 +121,28 @@ class BackupDestination(Protocol):
 - `POST /api/reset` → 不变(仍先 best-effort 备)。
 
 新增:
-- `POST /api/backup/verify`(可带 `?file=` / `?destination=`,默认校验各目标最新一份)→ 重哈希 + 重 `integrity_check`,比对 manifest,返回 `{file, ok, reason}`。
+- `POST /api/backup/verify`(可带 `?file=` / `?destination=`,默认校验各目标最新一份)→ 重哈希 + 重 `integrity_check`,比对 manifest。返回 **tri-state**:`{file, status, reason}`,`status ∈ {ok, mismatch, unavailable}`。
+  - `ok`:文件哈希 == manifest 且 `integrity_check == ok`。
+  - `mismatch`:**文件完整物化**但哈希对不上或 integrity_check 失败 —— 真·损坏/被改,该告警。
+  - `unavailable`:文件未物化且拉不下来(离线/驱逐),**暂时验不了**,不是损坏。
+
+### 7.1 异地副本的校验边界(同步盘 / iCloud)
+
+同步盘文件通过本地文件系统暴露,所以 `LocalDirDestination` 校验流程与本地一致(打开→哈希→integrity_check)。但 iCloud「优化存储」会把内容驱逐成占位符(dataless/`.icloud`),需特别处理:
+
+- **拉取策略按触发来源分流**:
+  - **显式 verify(用户点「立即校验」/ `POST /api/backup/verify`)**:若文件未物化,**主动触发下载**(`ensure_local(path, timeout)`:探测占位符 → 触发物化,macOS best-effort 走 `brctl download`/读探针,有界 `timeout`,默认常量 30s)→ 物化成功再校验;**超时/离线/拉取失败 → `unavailable`**(带原因),绝不挂起、绝不报错退出。
+  - **自动/周期 verify(调度器内)**:**只校验已物化**的文件,不触发任何下载(不偷跑流量、不扰动驱逐策略);未物化者记 `unavailable` 跳过。
+- **不引入假阳性(回应「拉取会不会引入额外错误」)**:这是硬约束——**任何下载/读取失败、部分物化,一律归 `unavailable`,绝不归 `mismatch`**。哈希前先确认完整物化(size 与 manifest 一致 + 非占位符);拉到一半的文件不参与哈希。于是「拉取」最坏只让你得到 `unavailable`,不会凭空报「损坏」吓人。
+- **信任边界(诚实声明)**:我们校验的是**本机看到的那份物化副本**,不是云端服务器上的字节。云端坏版本同步下来 → 哈希对不上 → **能抓到**;但 iCloud 把 `.db` 与 manifest **一起回滚到旧版本**(两者自洽)→ 报 `ok` 但其实是旧快照(「损坏」可抓,「一致地变旧」不可抓)。真·服务端校验(不下载即比对 checksum/ETag)是对象存储才有的能力,留给将来的 `S3Destination`——也再次印证可插拔目标接口的价值。
 
 ## 8. 前端(小改动)
 
 复用现有「备份/恢复」UI(架构 #10/#11):
-- 备份列表每行加状态徽标:`✓ 已校验` / `⚠ 不一致` / `… 未校验`。
+- 备份列表每行加状态徽标:`✓ 已校验(ok)` / `⚠ 不一致(mismatch)` / `☁ 未物化·暂不可验(unavailable)` / `… 未校验`。
 - 顶部显示「上次自动备份时间」「异地:已配置/未配置(指向 …)」。
 - 恢复弹窗可选来源目标(本地 / 异地)。
-- 一个「立即校验」按钮 → `POST /api/backup/verify`。
+- 一个「立即校验」按钮 → `POST /api/backup/verify`(显式触发,会按 §7.1 尝试拉取异地文件再验)。`unavailable` 用中性提示(「这份当前不在本机,已尝试拉取未成功」),不渲染成红色告警——只有 `mismatch` 才告警。
 
 ## 9. 配置(`.env` / `config.py`)
 
@@ -146,9 +160,13 @@ class BackupDestination(Protocol):
 - 变更检测:连续两次无写入 → 第二次 `skipped`;有写入 → 不跳过。
 - 轮转:写 35 份、`keep=30` → 留最新 30、删最老 5(按 `created_at`)。
 - manifest 往返:`store` 后 `list` 读回 meta 一致;manifest 缺失时容错列盘。
-- `FakeDestination`(内存)证接口缝:`make_backup` 写入**所有**目标 + 各自 `prune`(对齐子项目 B 的 fake 套路)。
-- verify 端点:篡改某备份字节 → `POST /api/backup/verify` 报 `ok=false`。
-- 调度:直接测 `run_cycle()` 一轮(不测定时器循环);CLI `python -m app.backup` 冒烟。
+- `FakeDestination`(内存,可设「已物化/未物化/拉取失败」态)证接口缝:`make_backup` 写入**所有**目标 + 各自 `prune`(对齐子项目 B 的 fake 套路)。
+- verify **tri-state**(关键):
+  - 完整物化 + 篡改字节 → `mismatch`。
+  - 完整物化 + 完好 → `ok`。
+  - 未物化 + 拉取失败/超时 → `unavailable`(**绝不**因此报 `mismatch`)。
+  - 部分物化(size 不足)→ `unavailable`,不参与哈希(防假阳性)。
+- 调度:直接测 `run_cycle()` 一轮(不测定时器循环);自动 verify 遇未物化文件 → `unavailable` 且**不触发下载**;CLI `python -m app.backup` 冒烟。
 
 覆盖率:`backup.py` 含较多 I/O,归「外围只报告不卡」一档(与网络/模型代码同档),但纯部分(checksum/轮转选择/变更检测)仍要测透;核心硬线仍只压 `calc.py`+`services.py`。
 
@@ -157,6 +175,7 @@ class BackupDestination(Protocol):
 1. 备份**异地**靠「写一份到同步盘目录」——`BackupDestination` 接口下,异地只是又一个 `LocalDirDestination` 实例,路径在网盘里即得离机副本;零新依赖、零密钥。S3/rsync/加密留作新实现类。
 2. 备份**自动化**用**进程内 lifespan 守护任务**(启动备 + 每 12h + 退出备),非 OS cron / APScheduler——契合单文件可打包、他机最小化复现;另暴露 `python -m app.backup` 给 cron 用户自接。
 3. 备份**可信**靠 SHA-256 + `PRAGMA integrity_check` 写入 manifest + 不经恢复的 `verify`;坏备份在产出阶段即被拒。
+3a. **异地校验 tri-state**:`verify` 返回 `ok/mismatch/unavailable`。显式校验时主动拉取未物化的同步盘文件(有界超时,拉不下来 → `unavailable`),自动校验只验已物化者不触发下载;**拉取/部分物化一律归 `unavailable`,绝不假报 `mismatch`**。只能校验本机物化副本(抓得到云端损坏,抓不到「一致地变旧」);服务端不下载即校验留给将来 `S3Destination`。
 4. **变更检测**(live 文件哈希)避免定时器堆重复;**计数式保留**(默认 30/目标)防无限堆积。
 5. 备份逻辑从路由抽到 `app/backup.py`(纯逻辑/框架无关,对齐 calc/services 分层),manifest 用目录内 JSON 不入库,保持单文件可打包。
 
@@ -165,3 +184,22 @@ class BackupDestination(Protocol):
 - 现有 4 个端点签名保留;`GET /api/backups` 返回**新增字段**(向后兼容,前端渐进使用)。
 - 现有备份文件(无 manifest 记录)被容错列出、标「未校验」,不报错。
 - 不配 `STOCKBOOK_BACKUP_DIR` 时行为≈现状(只多了本地的校验/轮转/自动),老用户零感知升级。
+
+## 13. 数据库可移植性(换库怎么办)——只标接缝,本轮不实现
+
+**立场**:备份本轮**有意**绑定 SQLite。「SQLite 单文件 / 零运维 / `pip install` 即跑 / 可打包分享」是 StockBook 的**核心身份**(架构既定决策),换成 Postgres/MySQL 是地基级变动、会同时改写「本地优先」整个定位——故备份不为这个远期假设过度投资。但把耦合**收口**,使将来换库不必重写整个备份系统。
+
+**SQLite 耦合点(全部集中在「产出/校验/恢复」一小块)**:
+1. `sqlite3.Connection.backup()`(在线快照)。
+2. `PRAGMA integrity_check`(完整性)。
+3. 「快照单个 `.db` 文件」模型(因单文件而成立)。
+4. 产物为 `.db` 文件。
+
+**DB 无关、原样复用的部分**:`BackupDestination`/异地、manifest、对产物算 SHA-256、保留轮转、调度、verify 外壳(`pg_dump` 同样产出一个文件,照样哈希/异地/轮转)。
+
+**将来的迁移路径(届时再做)**:对称于 `BackupDestination`,引入 `BackupSource` Protocol —— `snapshot() -> artifact`、`verify_artifact(artifact) -> bool`、`restore(artifact)`。
+- `SqliteBackupSource` = 把上述四点耦合(今天的代码)关进一个类;`integrity_check` 即 `verify_artifact`。
+- `PostgresBackupSource` = `pg_dump`/`pg_restore`;`verify_artifact` 退化为「试恢复进临时库能否成功」。
+- 其余(目标/manifest/轮转/调度/API)一行不动。换库 = 新写一个 source 类。
+
+**本轮落地约束(为将来抽离铺路、但不建接口)**:把这四点耦合**收敛在 `app/backup.py` 内少数命名清晰的函数**里(如 `_sqlite_snapshot` / `_sqlite_integrity_check` / `_sqlite_restore`),不要散落到路由或编排逻辑中——将来抽 `BackupSource` 时只需把这几个函数挪进一个类。
