@@ -93,6 +93,7 @@ docs/architecture.md   技术选型、架构分层、关键决策、功能日志
 - `STOCKBOOK_BACKUP_DIR` — 异地/同步盘备份目录(如 iCloud/坚果云路径);留空=仅本地
 - `STOCKBOOK_BACKUP_INTERVAL_HOURS` — 自动备份间隔小时(默认 `12`;设 `0` 关闭自动备份)
 - `STOCKBOOK_BACKUP_KEEP` — 每个目标保留的最新备份份数(默认 `30`)
+- `STOCKBOOK_BACKUP_PASSPHRASE` — 异地备份加密口令(Fernet);留空=异地明文 + 告警。**注意:忘口令则加密的异地备份永久无法解开(本地明文备份不受影响)。**
 
 **RAG 问答**
 - `STOCKBOOK_RAG_ENABLED=1` — 启用问答功能(默认关)

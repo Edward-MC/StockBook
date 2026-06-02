@@ -69,7 +69,7 @@
 - 再平衡留痕:`POST /api/strategy/rebalanced`。
 - 行情:`POST /api/prices/refresh`(多源 failover,写 `source=auto`,顺带补全占位名称)。
 - 记录/现金:`GET /api/ledger`、`POST/DELETE /api/cashflows`。
-- 备份:`POST /api/backup`(强制一次,多目标)、`GET /api/backups`(带 integrity/destinations)、`POST /api/backup/verify`(tri-state,显式会拉取异地)、`POST /api/restore`(可选 `destination`,本地/异地)。
+- 备份:`POST /api/backup`(强制一次,多目标)、`GET /api/backups`(带 integrity/destinations/encrypted)、`POST /api/backup/verify`(tri-state,显式会拉取异地)、`POST /api/restore`(可选 `destination`,本地/异地;解密失败→400)。
 - 重置:`POST /api/reset`(先自动备份)。
 - RAG 问答:`GET /api/rag/status`(始终可用,前端据此决定是否显示问答窗)、`POST /api/rag/ask`(三重护栏:总开关/只读/限流)、`POST /api/rag/sync`(删旧重建,不调 LLM)、`POST/DELETE /api/rag/sources`。
 
@@ -80,6 +80,8 @@
 18. **数据源接口化(子项目 B)**:三处「可替换后端」——行情源、embedding、检索——各抽出一个 `typing.Protocol` 接口(`QuoteSource`/`Embedder`/`Retriever`),现有实现包成类(`TencentSource`/`SinaSource`/`EastmoneySource`、`FastembedEmbedder`、`NumpyCosineRetriever`)。三者干的事不同、**接口各自独立**,统一的只是「Protocol + 注册/选择」这套做法。行情源用注册表 `QUOTE_SOURCES`(替代 `_FETCHERS`);embedding/检索用 `get_embedder()`/`get_retriever()` 选择器。**纯重构、零新行为**:`fetch_quotes`/`embed_texts`/`store.search` 等被消费的模块级函数保留为兼容垫片,消费方一行不改。**不加配置开关**(YAGNI):embedding/检索各仅一个实现,选择器现在直接返回默认对象,留作将来第二实现的单一改动点(如检索换 sqlite-vec)。收益:加新后端不动老代码;测试用 fake 实现替代网络/模型(`FakeQuoteSource`/`FakeEmbedder`/`FakeRetriever`),failover/检索测试不再依赖外部。
 
 19. **备份加固(数据安全)**:备份从「同盘/明文/无校验/无自动/无轮转」升级为**自动化 + 可校验 + 异地**。抽出 `app/backup.py`(对齐 calc/services 分层),`BackupDestination` Protocol + `LocalDirDestination` 复用为本地主目标 + 同步盘异地目标(`STOCKBOOK_BACKUP_DIR` 指向 iCloud/坚果云即得离机副本,零密钥);每份备份 SHA-256 + `PRAGMA integrity_check` 写入目录内 `manifest.json`;`verify` 返回 **tri-state**(`ok/mismatch/unavailable`)——显式校验会有界拉取未物化的同步盘文件、拉不下来即 `unavailable`,**任何拉取/部分物化失败都不假报 mismatch**;只能校验本机物化副本(抓得到云端损坏、抓不到「一致地变旧」,服务端校验留给将来 `S3Destination`)。进程内 lifespan 调度(启动备 + 每 12h + 退出备,`STOCKBOOK_BACKUP_INTERVAL_HOURS=0` 关闭)+ `python -m app.backup` CLI;变更检测(live 文件哈希)跳过无变化、计数式保留(`STOCKBOOK_BACKUP_KEEP`,默认 30)。SQLite 耦合收敛在 `_sqlite_*` 几个函数,换库时按 spec §13 抽 `BackupSource`(本轮不建)。
+
+20. **备份加密(只加密异地)**:给离机的异地备份加 Fernet 认证加密,**本地保持明文**(本地明文是「忘口令也能恢复」的安全冗余 —— 忘口令最多失去异地、不丢全部)。`EncryptedDestination` 装饰器包在 offsite `LocalDirDestination` 外:`store` 加密成 `<name>.enc`、`fetch` 解密,manifest 透传内层(逻辑名↔`.enc` 映射,`sha256` 存明文哈希)。密钥 = `scrypt(STOCKBOOK_BACKUP_PASSPHRASE, salt)`→Fernet,salt/KDF 参数存异地目录 `enc.json`(文件夹自描述,带口令即可解,跨平台,原子写)。**设口令即加密、无额外开关**(YAGNI);配了异地但没口令 → 明文 + 告警。`verify` 对加密备份**解密到本地临时文件再校验**(Fernet 认证使篡改/错口令→`mismatch`、读取失败→`unavailable`,明文绝不落进同步盘);恢复解密或干净中止(错口令→400,live 库未动)。改口令不支持轮转(改前先用旧口令把异地迁出)。
 
 ## 6. 数据模型
 两层:Security 归入 AssetClass,AssetClass 归入 Strategy。持仓由 Transaction 推导;PriceQuote 每标的一条最新价。详见 `models.py` 与设计文档 §3。
@@ -106,6 +108,7 @@
 - **2026-06-01** 测试基建(子项目 E):GitHub Actions CI(pytest + 分层覆盖率 gate)+ Hypothesis 核心不变量套件(`tests/test_calc_properties.py`,I1–I8,每条经变异检查)+ 核心模块覆盖率硬线(`calc.py`/`services.py` 合并 `--fail-under=95`,实测 99%)+ 独立 `requirements-dev.txt`/`pyproject.toml`。评估后排除 lint(3.9 守卫无可靠工具)。设计见 `docs/superpowers/specs/2026-06-01-stockbook-test-infra-design.md`,计划见 `docs/superpowers/plans/2026-06-01-test-infra.md`。
 - **2026-06-01** 数据源接口化(子项目 B):行情源/embedding/检索三处各抽 `Protocol` 接口 + 实现类 + 注册/选择(`QuoteSource`/`Embedder`/`Retriever`);`_FETCHERS`→`QUOTE_SOURCES` 注册表,`get_embedder()`/`get_retriever()` 选择器;被消费函数保留为垫片,纯重构零新行为;新增 fake 实现解耦网络/模型测试。设计见 `docs/superpowers/specs/2026-06-01-stockbook-datasource-interfaces-design.md`,计划见 `docs/superpowers/plans/2026-06-01-datasource-interfaces.md`。
 - **2026-06-02** 备份加固(数据安全):抽 `app/backup.py` + `BackupDestination` 接口(本地 + 同步盘异地)+ SHA-256/`integrity_check`/manifest + `verify` tri-state(异地按需拉取,失败不假报 mismatch)+ 进程内 12h 调度/`python -m app.backup` CLI + 变更检测/保留(30);SQLite 耦合收敛 `_sqlite_*` 留 `BackupSource` 接缝。设计见 `docs/superpowers/specs/2026-06-01-stockbook-backup-hardening-design.md`,计划见 `docs/superpowers/plans/2026-06-01-backup-hardening.md`。
+- **2026-06-02** 备份加密(只加密异地):`EncryptedDestination`(Fernet + scrypt 口令派生)包 offsite,`<name>.enc` + 自描述 `enc.json`(原子写);设 `STOCKBOOK_BACKUP_PASSPHRASE` 即加密、否则明文+告警;verify 解密后再校验(篡改/错口令→mismatch、读失败→unavailable,明文不落同步盘)、恢复错口令→400 且 live 不动;前端加锁标记 🔒。设计见 `docs/superpowers/specs/2026-06-02-stockbook-backup-encryption-design.md`,计划见 `docs/superpowers/plans/2026-06-02-backup-encryption.md`。
 
 ## 8. 约定
 - **新增功能 = 同时更新本文档**(关键决策 / API 一览 / 功能日志)与对应测试。
