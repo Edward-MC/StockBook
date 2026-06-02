@@ -399,6 +399,7 @@ table.list td.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums
 .bk-badge.ok{background:var(--sage-soft);border-color:var(--sage);color:var(--sage)}
 .bk-badge.warn{background:var(--accent-soft);border-color:var(--accent);color:var(--accent)}
 .bk-badge.muted{background:var(--card-2);border-color:var(--edge-strong);color:var(--ink-3)}
+.bk-lock{font-size:11px;vertical-align:middle;margin-left:5px;cursor:default}
 .bk-row-right{display:flex;align-items:center;gap:6px;flex-shrink:0}
 
 @keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}

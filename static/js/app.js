@@ -100,9 +100,15 @@ function _bkSummary(list) {
   const newest = list.reduce((a, b) => (a.modified > b.modified ? a : b));
   const ts = newest.modified.slice(0, 19).replace("T", " ");
   const hasOffsite = list.some(b => (b.destinations || []).includes("offsite"));
-  const offsiteLabel = hasOffsite
-    ? '<span>异地:<strong>已配置</strong></span>'
-    : '<span>异地:<span style="color:var(--ink-3)">未配置</span></span>';
+  const hasEnc = list.some(b => b.encrypted);
+  let offsiteLabel;
+  if (hasOffsite && hasEnc) {
+    offsiteLabel = '<span>异地:<strong>已加密</strong> 🔒</span>';
+  } else if (hasOffsite) {
+    offsiteLabel = '<span>异地:<strong>已配置</strong><span style="color:var(--accent);margin-left:2px" title="异地副本未加密">⚠</span><span style="color:var(--ink-3)">(未加密)</span></span>';
+  } else {
+    offsiteLabel = '<span>异地:<span style="color:var(--ink-3)">未配置</span></span>';
+  }
   return `<div class="bk-info"><span>上次备份:${ts}</span>${offsiteLabel}</div>`;
 }
 
@@ -127,9 +133,10 @@ async function renderBackupList() {
            </select>
            <button class="mini-btn primary" data-restore="${b.file}">恢复</button>`
         : `<button class="mini-btn" data-restore="${b.file}">恢复</button>`;
+      const lockBadge = b.encrypted ? '<span class="bk-lock" title="异地副本已加密">🔒</span>' : '';
       return `<div class="bk-row">
         <div>
-          <div class="bk-file">${b.file}</div>
+          <div class="bk-file">${b.file}${lockBadge}</div>
           <div class="bk-meta">${b.modified.slice(0, 19).replace("T", " ")} · ${(b.size / 1024).toFixed(0)} KB
             &ensp;${_destBadges(dests)}&ensp;${_bkBadge(b.file)}</div>
         </div>
@@ -179,7 +186,12 @@ async function verifyBackups() {
     await renderBackupList();
     const mismatches = results.filter(r => r.status === "mismatch");
     if (mismatches.length) {
-      toast(`⚠ ${mismatches.length} 个备份校验不一致`, true);
+      const decryptFails = mismatches.filter(r => (r.reason || "").includes("解密失败"));
+      if (decryptFails.length) {
+        toast("🔒 解密失败:口令错误或文件损坏 —— 先确认 .env 口令再判定损坏", true);
+      } else {
+        toast(`⚠ ${mismatches.length} 个备份校验不一致`, true);
+      }
     } else {
       toast("校验完成");
     }
