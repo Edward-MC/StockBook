@@ -73,42 +73,118 @@ function bind() {
   byId("refresh-prices")?.addEventListener("click", () => refreshPrices(false));
   byId("backup-db")?.addEventListener("click", openBackupModal);
   byId("bk-now")?.addEventListener("click", doBackup);
+  byId("bk-verify")?.addEventListener("click", verifyBackups);
   byId("bk-close")?.addEventListener("click", () => byId("backup-modal").classList.remove("show"));
   byId("backup-modal")?.addEventListener("click", e => { if (e.target.id === "backup-modal") byId("backup-modal").classList.remove("show"); });
 }
 
 /* ---------- backup / restore ---------- */
+
+// Per-file verified state (populated by verifyBackups); key = file, val = 'ok'|'mismatch'|'unavailable'
+let _bkVerified = {};
+
+function _bkBadge(file) {
+  const s = _bkVerified[file];
+  if (s === "ok")          return '<span class="bk-badge ok">✓ 已校验</span>';
+  if (s === "mismatch")    return '<span class="bk-badge warn">⚠ 不一致</span>';
+  if (s === "unavailable") return '<span class="bk-badge muted">☁ 暂不可验</span>';
+  return '<span class="bk-badge muted">… 未校验</span>';
+}
+
+function _destBadges(destinations) {
+  return (destinations || []).map(d => `<span class="bk-badge muted">${d}</span>`).join(" ");
+}
+
+function _bkSummary(list) {
+  if (!list.length) return "";
+  const newest = list.reduce((a, b) => (a.modified > b.modified ? a : b));
+  const ts = newest.modified.slice(0, 19).replace("T", " ");
+  const hasOffsite = list.some(b => (b.destinations || []).includes("offsite"));
+  const offsiteLabel = hasOffsite
+    ? '<span>异地:<strong>已配置</strong></span>'
+    : '<span>异地:<span style="color:var(--ink-3)">未配置</span></span>';
+  return `<div class="bk-info"><span>上次自动备份:${ts}</span>${offsiteLabel}</div>`;
+}
+
 async function openBackupModal() {
   byId("backup-modal").classList.add("show");
   await renderBackupList();
 }
+
 async function renderBackupList() {
   const box = byId("bk-list");
   try {
     const list = await api("GET", "/api/backups");
     if (!list.length) { box.innerHTML = `<div class="bk-empty">还没有备份。点「立即备份」创建一个。</div>`; return; }
-    box.innerHTML = list.map(b => `
-      <div class="bk-row">
-        <div><div class="bk-file">${b.file}</div>
-          <div class="bk-meta">${b.modified.slice(0, 19).replace("T", " ")} · ${(b.size / 1024).toFixed(0)} KB</div></div>
-        <button class="mini-btn" data-restore="${b.file}">恢复</button>
-      </div>`).join("");
+    box.innerHTML = _bkSummary(list) + list.map(b => {
+      const dests = b.destinations || [];
+      const hasOffsite = dests.includes("offsite");
+      // Restore button: if offsite available show a destination selector, else just restore
+      const restoreBtn = hasOffsite
+        ? `<select class="mini-btn" data-dest-sel="${b.file}" style="padding:4px 6px">
+             <option value="local">local</option>
+             <option value="offsite">offsite</option>
+           </select>
+           <button class="mini-btn primary" data-restore="${b.file}">恢复</button>`
+        : `<button class="mini-btn" data-restore="${b.file}">恢复</button>`;
+      return `<div class="bk-row">
+        <div>
+          <div class="bk-file">${b.file}</div>
+          <div class="bk-meta">${b.modified.slice(0, 19).replace("T", " ")} · ${(b.size / 1024).toFixed(0)} KB
+            &ensp;${_destBadges(dests)}&ensp;${_bkBadge(b.file)}</div>
+        </div>
+        <div class="bk-row-right">${restoreBtn}</div>
+      </div>`;
+    }).join("");
     box.querySelectorAll("[data-restore]").forEach(btn =>
-      btn.addEventListener("click", () => doRestore(btn.dataset.restore)));
+      btn.addEventListener("click", () => {
+        const file = btn.dataset.restore;
+        const sel = box.querySelector(`[data-dest-sel="${file}"]`);
+        const dest = sel ? sel.value : "local";
+        doRestore(file, dest);
+      }));
   } catch (e) { box.innerHTML = `<div class="bk-empty">${e.message}</div>`; }
 }
+
 async function doBackup() {
   try { const r = await api("POST", "/api/backup"); toast(`已备份:${r.file}`); await renderBackupList(); }
   catch (e) { toast(e.message, true); }
 }
-async function doRestore(file) {
+
+async function doRestore(file, destination) {
   if (!confirm(`恢复到「${file}」?当前数据会先自动备份一次,再被覆盖。`)) return;
   try {
-    await api("POST", "/api/restore", { file });
+    const body = { file };
+    if (destination && destination !== "local") body.destination = destination;
+    await api("POST", "/api/restore", body);
     byId("backup-modal").classList.remove("show");
     toast("已恢复备份");
     await load();
   } catch (e) { toast(e.message, true); }
+}
+
+async function verifyBackups() {
+  const btn = byId("bk-verify");
+  if (btn) { btn.disabled = true; btn.textContent = "校验中…"; }
+  try {
+    const results = await api("POST", "/api/backup/verify");
+    // Worst-status-wins per file: mismatch(2) > unavailable(1) > ok(0)
+    const rank = { ok: 0, unavailable: 1, mismatch: 2 };
+    _bkVerified = {};
+    results.forEach(r => {
+      if (_bkVerified[r.file] === undefined || rank[r.status] > rank[_bkVerified[r.file]]) {
+        _bkVerified[r.file] = r.status;
+      }
+    });
+    await renderBackupList();
+    const mismatches = results.filter(r => r.status === "mismatch");
+    if (mismatches.length) {
+      toast(`⚠ ${mismatches.length} 个备份校验不一致`, true);
+    } else {
+      toast("校验完成");
+    }
+  } catch (e) { toast(e.message, true); }
+  finally { if (btn) { btn.disabled = false; btn.textContent = "立即校验"; } }
 }
 
 /* ---------- live quotes ---------- */
