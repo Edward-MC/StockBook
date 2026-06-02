@@ -388,8 +388,6 @@ def test_inv_twr_sign_matches_simple(vals):
         assert (r > 0) == (simple > 0)
 ```
 
-> 删掉 Step 1 里那行占位 `import datetime as dt as _dt`——它只是示意"这里要导 datetime",真正的 import 写在第二个代码块顶部。最终文件里**不要**保留 `# noqa: E999` 那行。
-
 - [ ] **Step 3: 跑不变量**
 
 Run: `.venv/bin/pytest tests/test_calc_properties.py -q`
