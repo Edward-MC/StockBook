@@ -140,3 +140,13 @@ stockbook-<ts>.db.enc          # Fernet 密文
 - 既有本地备份/verify/restore 路径一字不改。
 - `GET /api/backups` 仅**新增** `encrypted` 字段(向后兼容)。
 - 新依赖 `cryptography` 进 `requirements.txt`(预编译 wheel,`pip install` 即得,不破坏「他机最小化复现」)。
+
+## 13. v2 修订(2026-06-02):逐文件加密 + 永远合并显示
+
+实测发现:口令删除后,异地退化成普通目标、`.enc` 物理名暴露,导致同一备份在列表里显示成两行(本地 `.db` + 异地 `.db.enc`)。修订模型:
+- **`EncryptedDestination` 永远包住 offsite**(只要配了 `BACKUP_DIR`,不再看有没有口令)。
+- **加密改为逐备份**:有口令存 `<名>.db.enc`(`encrypted=true`),没口令存 `<名>.db`(`encrypted=false`)。两种都是一次成功的异地备份(「有没有口令都能备」)。
+- **`list()` 永远报逻辑名**(剥 `.enc`)→ 永远和本地同名 → 合并一行;**现有 `.enc` 文件无需迁移**。
+- **`verify`/`restore` 按每条备份的 `meta.encrypted` 决定是否解密**(不再看目标类型):加密 + 没口令 → `verify=unavailable` / `restore` 抛 `ValueError`→400;加密 + 错口令 → `mismatch` / `InvalidToken`→400;明文备份照常。
+- 异地目录可同时含 `.db`(某次无口令)与 `.db.enc`(某次有口令),各按标记处理。
+- 备份列表加分页(每页 8 条 + 上一页/下一页)。
