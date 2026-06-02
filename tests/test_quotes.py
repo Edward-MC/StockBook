@@ -93,22 +93,42 @@ def test_to_em_secid():
     assert to_em_secid("920819") is None
 
 
+class FakeQuoteSource:
+    """A QuoteSource for tests — no network. Returns a canned result or raises."""
+    def __init__(self, name, result=None, error=None):
+        self.name = name
+        self._result = result or {}
+        self._error = error
+
+    def fetch(self, items):
+        if self._error is not None:
+            raise self._error
+        return self._result
+
+
 def test_fetch_quotes_failover(monkeypatch):
-    def bad(items):
-        raise httpx.ConnectError("down")
-    def good(items):
-        return {"510300": {"price": 1.0, "name": "x"}}
-    monkeypatch.setitem(quotes._FETCHERS, "tencent", bad)
-    monkeypatch.setitem(quotes._FETCHERS, "sina", good)
+    bad = FakeQuoteSource("tencent", error=httpx.ConnectError("down"))
+    good = FakeQuoteSource("sina", result={"510300": {"price": 1.0, "name": "x"}})
+    monkeypatch.setitem(quotes.QUOTE_SOURCES, "tencent", bad)
+    monkeypatch.setitem(quotes.QUOTE_SOURCES, "sina", good)
     out = quotes.fetch_quotes([("510300", "CN")], sources=["tencent", "sina"])
     assert out["510300"]["price"] == 1.0
     assert quotes.LAST_SOURCE == "sina"
 
 
 def test_fetch_quotes_all_sources_fail_raises(monkeypatch):
-    def bad(items):
-        raise httpx.ConnectError("down")
-    monkeypatch.setitem(quotes._FETCHERS, "tencent", bad)
-    monkeypatch.setitem(quotes._FETCHERS, "sina", bad)
+    bad = FakeQuoteSource("tencent", error=httpx.ConnectError("down"))
+    monkeypatch.setitem(quotes.QUOTE_SOURCES, "tencent", bad)
+    monkeypatch.setitem(quotes.QUOTE_SOURCES, "sina",
+                        FakeQuoteSource("sina", error=httpx.ConnectError("down")))
     with pytest.raises(httpx.HTTPError):
         quotes.fetch_quotes([("510300", "CN")], sources=["tencent", "sina"])
+
+
+def test_fetch_quotes_supports_new_registered_source(monkeypatch):
+    # 扩展性:加一个新源 = 注册一个对象,fetch_quotes 无需改动即可用它。
+    custom = FakeQuoteSource("custom", result={"510300": {"price": 9.9, "name": "c"}})
+    monkeypatch.setitem(quotes.QUOTE_SOURCES, "custom", custom)
+    out = quotes.fetch_quotes([("510300", "CN")], sources=["custom"])
+    assert out["510300"]["price"] == 9.9
+    assert quotes.LAST_SOURCE == "custom"

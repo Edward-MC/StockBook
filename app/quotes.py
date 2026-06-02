@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Protocol, Tuple
 
 import httpx
 
@@ -169,56 +169,68 @@ def _get(url: str, headers: Optional[dict] = None) -> httpx.Response:
         return r
 
 
-def _fetch_tencent(items) -> Dict[str, dict]:
-    syms = _qq_symbols(items)
-    if not syms:
-        return {}
-    r = _get(_TENCENT_URL + ",".join(syms), {"Referer": "https://finance.qq.com"})
-    return parse_tencent(r.content.decode("gbk", errors="ignore"))
+# --------------------------------------------------------------------------- #
+# Quote sources — each is a QuoteSource: a named backend that maps (code,
+# market) pairs to {code: {"price","name"}}, raising httpx.HTTPError on
+# transport failure. parse_* stay module-level pure helpers (unit-tested).
+# --------------------------------------------------------------------------- #
+class QuoteSource(Protocol):
+    name: str
+    def fetch(self, items: List[Tuple[str, str]]) -> Dict[str, dict]: ...
 
 
-def _fetch_sina(items) -> Dict[str, dict]:
-    syms = _qq_symbols(items)
-    if not syms:
-        return {}
-    r = _get(_SINA_URL + ",".join(syms), {"Referer": "https://finance.sina.com.cn"})
-    return parse_sina(r.content.decode("gbk", errors="ignore"))
+class TencentSource:
+    name = "tencent"
+    def fetch(self, items: List[Tuple[str, str]]) -> Dict[str, dict]:
+        syms = _qq_symbols(items)
+        if not syms:
+            return {}
+        r = _get(_TENCENT_URL + ",".join(syms), {"Referer": "https://finance.qq.com"})
+        return parse_tencent(r.content.decode("gbk", errors="ignore"))
 
 
-def _fetch_eastmoney(items) -> Dict[str, dict]:
-    secids = [s for s in (to_em_secid(c, m) for c, m in items) if s]
-    if not secids:
-        return {}
-    r = _get(_EASTMONEY_URL + ",".join(secids))
-    return parse_eastmoney(r.text)
+class SinaSource:
+    name = "sina"
+    def fetch(self, items: List[Tuple[str, str]]) -> Dict[str, dict]:
+        syms = _qq_symbols(items)
+        if not syms:
+            return {}
+        r = _get(_SINA_URL + ",".join(syms), {"Referer": "https://finance.sina.com.cn"})
+        return parse_sina(r.content.decode("gbk", errors="ignore"))
 
 
-_FETCHERS = {
-    "tencent": _fetch_tencent,
-    "sina": _fetch_sina,
-    "eastmoney": _fetch_eastmoney,
+class EastmoneySource:
+    name = "eastmoney"
+    def fetch(self, items: List[Tuple[str, str]]) -> Dict[str, dict]:
+        secids = [s for s in (to_em_secid(c, m) for c, m in items) if s]
+        if not secids:
+            return {}
+        r = _get(_EASTMONEY_URL + ",".join(secids))
+        return parse_eastmoney(r.text)
+
+
+# Registry: name -> source. Replaces the old _FETCHERS function map.
+QUOTE_SOURCES: Dict[str, QuoteSource] = {
+    s.name: s for s in (TencentSource(), SinaSource(), EastmoneySource())
 }
 
 
 def fetch_quotes(items: Iterable[Tuple[str, str]],
                  sources: Optional[List[str]] = None) -> Dict[str, dict]:
     """Fetch live quotes for (code, market) pairs, trying sources in order.
-
-    Returns {code: {"price", "name"}} from the first source that responds with
+    Returns {code: {"price","name"}} from the first source that responds with
     data. Raises httpx.HTTPError only if EVERY tried source failed at transport
-    level. Codes no source can classify are simply absent from the result.
-    Sets module-level LAST_SOURCE to the winning source name.
-    """
+    level. Sets module-level LAST_SOURCE to the winning source name."""
     global LAST_SOURCE
     items = list(items)
     chain = sources if sources is not None else list(config.QUOTE_SOURCES)
     last_err: Optional[httpx.HTTPError] = None
     for name in chain:
-        fetcher = _FETCHERS.get(name)
-        if fetcher is None:
+        source = QUOTE_SOURCES.get(name)
+        if source is None:
             continue
         try:
-            out = fetcher(items)
+            out = source.fetch(items)
         except httpx.HTTPError as e:
             last_err = e
             continue
@@ -226,6 +238,6 @@ def fetch_quotes(items: Iterable[Tuple[str, str]],
             LAST_SOURCE = name
             return out
     if last_err is not None:
-        raise last_err  # all sources errored → let caller surface it
+        raise last_err
     LAST_SOURCE = None
     return {}
