@@ -486,6 +486,8 @@ table.list td.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums
 .trend-svg .grid { stroke: #e7ded0; stroke-width: 1; }
 .trend-svg .hint { font-size: 13px; fill: #b3a692; }
 .trend-svg .endval { font-size: 12px; font-weight: 700; }
+.trend-svg .extreme-dot { fill: none; stroke: #8a7d6a; stroke-width: 1.5; }
+.trend-svg .extreme-val { font-size: 10.5px; font-weight: 600; fill: #8a7d6a; }
 .trend-svg .nav-capture { pointer-events: all; cursor: crosshair; }
 .trend-svg .cursor-line { stroke: #b3a692; stroke-width: 1; stroke-dasharray: 3 3; }
 .trend-svg .cursor-dot { fill: #4a3f30; }

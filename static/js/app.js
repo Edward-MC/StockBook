@@ -1295,12 +1295,13 @@ function navChartSvg(series, bench) {
     }
   }
   _NAV_HOVER = { pts: hoverPts };
+  const extrema = _extremaMarks(hoverPts, isMoney);
 
   const fmt = ms => new Date(ms).toISOString().slice(0, 10);
   // Full-SVG capture so fast moves never momentarily exit it (which would fire
   // a spurious mouseleave → hide/show flicker). x is clamped to the plot in paint.
   const hoverLayer = `<rect class="nav-capture" x="0" y="0" width="${CHART_W}" height="${CHART_H}" fill="transparent"/><g class="nav-cursor"></g>`;
-  return _chartSvg(`${body}${yLabels}${endLab}
+  return _chartSvg(`${body}${yLabels}${endLab}${extrema}
     <text x="${PAD}" y="${CHART_H - 8}" class="axis">${fmt(dmin)}</text>
     <text x="${CHART_W - PAD}" y="${CHART_H - 8}" class="axis" text-anchor="end">${fmt(dmax)}</text>
     ${hoverLayer}`);
@@ -1364,6 +1365,25 @@ function wireNavHover() {
     vbX = null; lastIdx = -1; cursor.style.display = "none";
     if (raf) { cancelAnimationFrame(raf); raf = 0; }
   });
+}
+
+// Always-on peak/trough markers (highest/lowest point of the primary line).
+// hoverPts: [{x, sy, val}]. Skips a mark that coincides with the end-value label.
+function _extremaMarks(pts, isMoney) {
+  if (pts.length < 3) return "";  // need a meaningful interior extreme
+  let hi = pts[0], lo = pts[0];
+  for (const p of pts) { if (p.val > hi.val) hi = p; if (p.val < lo.val) lo = p; }
+  if (hi.val === lo.val) return "";  // flat line — no extremes to call out
+  const lastX = pts[pts.length - 1].x;
+  const mark = (p, above) => {
+    if (Math.abs(p.x - lastX) < 1) return "";  // the end label already shows this point
+    const lab = (above ? "▴ " : "▾ ") + (isMoney ? _axisMoney(p.val) : Math.round(p.val));
+    const ly = above ? Math.max(p.sy - 9, PAD + 10) : Math.min(p.sy + 17, CHART_H - PAD - 2);
+    const anchor = p.x < PAD + 36 ? "start" : (p.x > CHART_W - PAD - 36 ? "end" : "middle");
+    return `<circle cx="${p.x.toFixed(1)}" cy="${p.sy.toFixed(1)}" r="3" class="extreme-dot"/>` +
+           `<text x="${p.x.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="${anchor}" class="extreme-val">${lab}</text>`;
+  };
+  return mark(hi, true) + mark(lo, false);
 }
 
 function _areaFill(pts, color) {
