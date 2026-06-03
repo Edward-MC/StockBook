@@ -159,3 +159,22 @@ class KnowledgeChunk(Base):
     seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     source: Mapped["NotionSource"] = relationship(back_populates="chunks")
+
+
+class Snapshot(Base):
+    """Daily net-asset-value snapshot — a deliberate exception to the project's
+    "derive, don't store" rule: a past day's market value can't be recomputed
+    (quotes have moved on), so the time series must be persisted. One row per
+    date (upserted). class_values is a JSON map {asset_class_id: market_value}
+    for the stacked-area chart."""
+    __tablename__ = "snapshots"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    date: Mapped[dt.date] = mapped_column(Date, nullable=False, unique=True)
+    total_assets: Mapped[float] = mapped_column(Float, nullable=False)
+    net_invested: Mapped[float] = mapped_column(Float, nullable=False)
+    benchmark: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    class_values: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime, nullable=False, default=func.now()
+    )
