@@ -178,3 +178,15 @@ class Snapshot(Base):
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime, nullable=False, default=func.now()
     )
+
+
+class BenchmarkPoint(Base):
+    """Daily close of the benchmark index (沪深300), persisted locally so the
+    trends page reads from the DB (no network on page load) and a benchmark line
+    is available from day one. Decoupled from Snapshot — the index has trading
+    days the user never snapshotted. One row per date (upserted)."""
+    __tablename__ = "benchmark_points"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    date: Mapped[dt.date] = mapped_column(Date, nullable=False, unique=True)
+    close: Mapped[float] = mapped_column(Float, nullable=False)
