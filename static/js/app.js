@@ -1313,26 +1313,54 @@ function wireNavHover() {
   const cap = svg.querySelector(".nav-capture");
   if (!cursor || !cap) return;
   const pts = _NAV_HOVER.pts;
-  const toVbX = e => {
-    const m = svg.getScreenCTM();
-    if (!m) return null;
-    const p = svg.createSVGPoint();
-    p.x = e.clientX; p.y = e.clientY;
-    return p.matrixTransform(m.inverse()).x;
-  };
+  const NS = "http://www.w3.org/2000/svg";
+
+  // Build the cursor nodes ONCE; mousemove only mutates their attributes. Re-
+  // creating <text> per event is what caused the flicker; attribute updates don't.
+  cursor.textContent = "";
+  const line = document.createElementNS(NS, "line");
+  line.setAttribute("class", "cursor-line");
+  line.setAttribute("y1", PAD); line.setAttribute("y2", CHART_H - PAD);
+  const dot = document.createElementNS(NS, "circle");
+  dot.setAttribute("class", "cursor-dot"); dot.setAttribute("r", "4");
+  const label = document.createElementNS(NS, "text");
+  label.setAttribute("class", "cursor-val"); label.setAttribute("y", PAD + 11);
+  cursor.appendChild(line); cursor.appendChild(dot); cursor.appendChild(label);
+  cursor.style.display = "none";
+
+  // rAF-throttle so rapid mousemove coalesces to one paint per frame (no jank).
+  let raf = 0, vbX = null, lastIdx = -1;
+  function paint() {
+    raf = 0;
+    if (vbX == null) return;
+    let bi = 0, bd = Infinity;
+    for (let i = 0; i < pts.length; i++) {
+      const d = Math.abs(pts[i].x - vbX);
+      if (d < bd) { bd = d; bi = i; }
+    }
+    if (bi === lastIdx) return;  // nearest point unchanged → skip redraw
+    lastIdx = bi;
+    const p = pts[bi];
+    line.setAttribute("x1", p.x.toFixed(1)); line.setAttribute("x2", p.x.toFixed(1));
+    dot.setAttribute("cx", p.x.toFixed(1)); dot.setAttribute("cy", p.sy.toFixed(1));
+    const right = p.x > CHART_W / 2;
+    label.setAttribute("x", (right ? p.x - 6 : p.x + 6).toFixed(1));
+    label.setAttribute("text-anchor", right ? "end" : "start");
+    label.textContent = `${p.date} · ${p.money ? (HIDE_AMT ? "•••" : money(p.val)) : Math.round(p.val)}`;
+    cursor.style.display = "";
+  }
   cap.addEventListener("mousemove", e => {
-    const x = toVbX(e);
-    if (x == null) return;
-    let best = pts[0], bd = Infinity;
-    for (const p of pts) { const dx = Math.abs(p.x - x); if (dx < bd) { bd = dx; best = p; } }
-    const val = best.money ? (HIDE_AMT ? "•••" : money(best.val)) : Math.round(best.val);
-    const right = best.x > CHART_W / 2;
-    cursor.innerHTML =
-      `<line x1="${best.x.toFixed(1)}" y1="${PAD}" x2="${best.x.toFixed(1)}" y2="${CHART_H - PAD}" class="cursor-line"/>` +
-      `<circle cx="${best.x.toFixed(1)}" cy="${best.sy.toFixed(1)}" r="4" class="cursor-dot"/>` +
-      `<text x="${(right ? best.x - 6 : best.x + 6).toFixed(1)}" y="${PAD + 11}" text-anchor="${right ? "end" : "start"}" class="cursor-val">${best.date} · ${val}</text>`;
+    const m = svg.getScreenCTM();
+    if (!m) return;
+    const sp = svg.createSVGPoint();
+    sp.x = e.clientX; sp.y = e.clientY;
+    vbX = sp.matrixTransform(m.inverse()).x;
+    if (!raf) raf = requestAnimationFrame(paint);
   });
-  cap.addEventListener("mouseleave", () => { cursor.innerHTML = ""; });
+  cap.addEventListener("mouseleave", () => {
+    vbX = null; lastIdx = -1; cursor.style.display = "none";
+    if (raf) { cancelAnimationFrame(raf); raf = 0; }
+  });
 }
 
 function _areaFill(pts, color) {
