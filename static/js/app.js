@@ -1110,6 +1110,7 @@ async function renderTrends() {
   renderMetricCards(h.metrics);
   renderSeriesToggle();
   byId("trend-chart").innerHTML = navChartSvg(h.series, h.benchmark_series || []);
+  wireNavHover();
   byId("trend-stack").innerHTML = stackChartSvg(h.series, h.class_names);
   renderStackLegend(h.series, h.class_names);
 }
@@ -1204,9 +1205,32 @@ function _linePts(dated, xOf, lo, hi) {
   return dated.filter(p => p.v != null).map(p => [xOf(p.d), _scaleY(p.v, lo, hi)]);
 }
 
+// Compact axis money: 263935 → "26.4万" (fits the narrow left gutter); masked under hideAmounts.
+function _axisMoney(v) {
+  if (HIDE_AMT) return "•••";
+  const a = Math.abs(v);
+  if (a >= 1e8) return (v / 1e8).toFixed(1) + "亿";
+  if (a >= 1e4) return (v / 1e4).toFixed(1) + "万";
+  return String(Math.round(v));
+}
+
+// Value label on every gridline so the chart is readable across its whole height.
+function _yGrid(lo, hi, isMoney) {
+  const rows = 4;
+  let out = "";
+  for (let r = 0; r <= rows; r++) {
+    const v = hi - (hi - lo) * r / rows;
+    const y = PAD + (CHART_H - 2 * PAD) * r / rows;
+    out += `<text x="3" y="${(y + 3).toFixed(1)}" class="axis">${isMoney ? _axisMoney(v) : Math.round(v)}</text>`;
+  }
+  return out;
+}
+
+let _NAV_HOVER = null;  // {pts:[{x, sy, date, val, money}]} for the hover crosshair
+
 function navChartSvg(series, bench) {
   const allDates = [...series.map(s => s.date), ...bench.map(b => b.date)];
-  if (!allDates.length) return _chartSvg(_centerHint("攒几天就有曲线了"));
+  if (!allDates.length) { _NAV_HOVER = null; return _chartSvg(_centerHint("攒几天就有曲线了")); }
   const ds = allDates.map(_dnum);
   const dmin = Math.min(...ds), dmax = Math.max(...ds);
   const xOf = _xScaler(dmin, dmax);
@@ -1215,7 +1239,7 @@ function navChartSvg(series, bench) {
   const benchDated = bench.map(b => ({ d: b.date, v: b.close }));
   const showBench = TREND_SHOW.benchmark && bench.length >= 2;
 
-  let body = "", yLabels = "";
+  let body = "", primary = null, lo, hi, isMoney;
 
   if (hasPort) {
     const ta = series.map(s => ({ d: s.date, v: s.total_assets }));
@@ -1223,16 +1247,18 @@ function navChartSvg(series, bench) {
     const vals = [];
     if (TREND_SHOW.total_assets) vals.push(...ta.map(p => p.v).filter(v => v != null));
     if (TREND_SHOW.net_invested) vals.push(...ni.map(p => p.v).filter(v => v != null));
-    if (!vals.length) return _chartSvg(_centerHint("勾选上方序列以显示曲线"));
-    let lo = Math.min(...vals), hi = Math.max(...vals);
+    if (!vals.length) { _NAV_HOVER = null; return _chartSvg(_centerHint("勾选上方序列以显示曲线")); }
+    lo = Math.min(...vals); hi = Math.max(...vals); isMoney = true;
     if (lo === hi) { lo -= 1; hi += 1; }
 
     if (TREND_SHOW.total_assets) {
       const pts = _linePts(ta, xOf, lo, hi);
       body += _areaFill(pts) + _polyline(pts, "#7a5c3e", false) + _endDot(pts, "#7a5c3e");
+      primary = { dated: ta, color: "#7a5c3e" };
     }
     if (TREND_SHOW.net_invested) {
       body += _polyline(_linePts(ni, xOf, lo, hi), "#9b8b76", true);
+      if (!primary) primary = { dated: ni, color: "#9b8b76" };
     }
     if (showBench) {  // overlay, auto-scaled to its own range (not aligned)
       const bv = benchDated.map(p => p.v);
@@ -1240,28 +1266,73 @@ function navChartSvg(series, bench) {
       if (blo === bhi) { blo -= 1; bhi += 1; }
       body += _polyline(_linePts(benchDated, xOf, blo, bhi), "#5c7a6e", false);
     }
-    yLabels = HIDE_AMT
-      ? `<text x="2" y="${PAD}" class="axis">•••</text>`
-      : `<text x="2" y="${PAD}" class="axis">${money(hi)}</text>
-         <text x="2" y="${CHART_H - PAD}" class="axis">${money(lo)}</text>`;
   } else if (showBench) {
     // No portfolio yet — the 沪深300 line is the main subject (its own scale).
     const bv = benchDated.map(p => p.v);
-    let blo = Math.min(...bv), bhi = Math.max(...bv);
-    if (blo === bhi) { blo -= 1; bhi += 1; }
-    const pts = _linePts(benchDated, xOf, blo, bhi);
+    lo = Math.min(...bv); hi = Math.max(...bv); isMoney = false;
+    if (lo === hi) { lo -= 1; hi += 1; }
+    const pts = _linePts(benchDated, xOf, lo, hi);
     body += _areaFill(pts, "#5c7a6e") + _polyline(pts, "#5c7a6e", false) + _endDot(pts, "#5c7a6e");
-    yLabels = `<text x="2" y="${PAD}" class="axis">${Math.round(bhi)}</text>
-               <text x="2" y="${CHART_H - PAD}" class="axis">${Math.round(blo)}</text>
-               <text x="${CHART_W - PAD}" y="${PAD - 6}" class="axis hint" text-anchor="end">沪深300 点位</text>`;
+    body += `<text x="${CHART_W - PAD}" y="${PAD - 6}" class="axis hint" text-anchor="end">沪深300 点位</text>`;
+    primary = { dated: benchDated, color: "#5c7a6e" };
   } else {
+    _NAV_HOVER = null;
     return _chartSvg(_centerHint("攒几天就有曲线了"));
   }
 
+  // Gridline value labels + current-value label at the end point + hover data.
+  const yLabels = _yGrid(lo, hi, isMoney);
+  let endLab = "";
+  let hoverPts = [];
+  if (primary) {
+    const dd = primary.dated.filter(p => p.v != null);
+    hoverPts = dd.map(p => ({ x: xOf(p.d), sy: _scaleY(p.v, lo, hi), date: p.d, val: p.v, money: isMoney }));
+    if (dd.length) {
+      const lp = hoverPts[hoverPts.length - 1];
+      const lab = isMoney ? _axisMoney(dd[dd.length - 1].v) : Math.round(dd[dd.length - 1].v);
+      const ey = Math.min(Math.max(lp.sy - 8, PAD + 10), CHART_H - PAD - 4);
+      endLab = `<text x="${(lp.x - 6).toFixed(1)}" y="${ey.toFixed(1)}" text-anchor="end" class="endval" fill="${primary.color}">${lab}</text>`;
+    }
+  }
+  _NAV_HOVER = { pts: hoverPts };
+
   const fmt = ms => new Date(ms).toISOString().slice(0, 10);
-  return _chartSvg(`${body}${yLabels}
+  const hoverLayer = `<rect class="nav-capture" x="${PAD}" y="${PAD}" width="${(CHART_W - 2 * PAD).toFixed(1)}" height="${(CHART_H - 2 * PAD).toFixed(1)}" fill="transparent"/><g class="nav-cursor"></g>`;
+  return _chartSvg(`${body}${yLabels}${endLab}
     <text x="${PAD}" y="${CHART_H - 8}" class="axis">${fmt(dmin)}</text>
-    <text x="${CHART_W - PAD}" y="${CHART_H - 8}" class="axis" text-anchor="end">${fmt(dmax)}</text>`);
+    <text x="${CHART_W - PAD}" y="${CHART_H - 8}" class="axis" text-anchor="end">${fmt(dmax)}</text>
+    ${hoverLayer}`);
+}
+
+// Crosshair + value tooltip on hover (wired after the SVG is in the DOM).
+function wireNavHover() {
+  const host = byId("trend-chart");
+  const svg = host && host.querySelector("svg");
+  if (!svg || !_NAV_HOVER || !_NAV_HOVER.pts.length) return;
+  const cursor = svg.querySelector(".nav-cursor");
+  const cap = svg.querySelector(".nav-capture");
+  if (!cursor || !cap) return;
+  const pts = _NAV_HOVER.pts;
+  const toVbX = e => {
+    const m = svg.getScreenCTM();
+    if (!m) return null;
+    const p = svg.createSVGPoint();
+    p.x = e.clientX; p.y = e.clientY;
+    return p.matrixTransform(m.inverse()).x;
+  };
+  cap.addEventListener("mousemove", e => {
+    const x = toVbX(e);
+    if (x == null) return;
+    let best = pts[0], bd = Infinity;
+    for (const p of pts) { const dx = Math.abs(p.x - x); if (dx < bd) { bd = dx; best = p; } }
+    const val = best.money ? (HIDE_AMT ? "•••" : money(best.val)) : Math.round(best.val);
+    const right = best.x > CHART_W / 2;
+    cursor.innerHTML =
+      `<line x1="${best.x.toFixed(1)}" y1="${PAD}" x2="${best.x.toFixed(1)}" y2="${CHART_H - PAD}" class="cursor-line"/>` +
+      `<circle cx="${best.x.toFixed(1)}" cy="${best.sy.toFixed(1)}" r="4" class="cursor-dot"/>` +
+      `<text x="${(right ? best.x - 6 : best.x + 6).toFixed(1)}" y="${PAD + 11}" text-anchor="${right ? "end" : "start"}" class="cursor-val">${best.date} · ${val}</text>`;
+  });
+  cap.addEventListener("mouseleave", () => { cursor.innerHTML = ""; });
 }
 
 function _areaFill(pts, color) {

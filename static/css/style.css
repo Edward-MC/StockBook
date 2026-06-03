@@ -462,7 +462,14 @@ table.list td.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums
 @keyframes rag-indet{0%{margin-left:-40%}100%{margin-left:100%}}
 
 /* ---------- 走势 / 绩效 ---------- */
-#panel-trends .card + .card { margin-top: 24px; }  /* .card has no own margin */
+/* Roomier, softer cards: generous inner padding + a lighter hairline + more lift. */
+#panel-trends .card {
+  padding: 24px 28px;
+  border-color: #ECE3D2;
+  border-radius: 16px;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, .6) inset, 0 18px 42px -26px rgba(60, 40, 20, .35);
+}
+#panel-trends .card + .card { margin-top: 18px; }
 .trends-head { display: flex; align-items: center; justify-content: space-between; }
 .series-toggle .chk { font: inherit; }
 .metric-cards { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 12px; }
@@ -478,6 +485,11 @@ table.list td.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums
 .trend-svg .axis { font-size: 11px; fill: #a99c87; }
 .trend-svg .grid { stroke: #e7ded0; stroke-width: 1; }
 .trend-svg .hint { font-size: 13px; fill: #b3a692; }
+.trend-svg .endval { font-size: 12px; font-weight: 700; }
+.trend-svg .nav-capture { pointer-events: all; cursor: crosshair; }
+.trend-svg .cursor-line { stroke: #b3a692; stroke-width: 1; stroke-dasharray: 3 3; }
+.trend-svg .cursor-dot { fill: #4a3f30; }
+.trend-svg .cursor-val { font-size: 12px; font-weight: 700; fill: #4a3f30; }
 .legend .leg { display: inline-flex; align-items: center; margin: 6px 10px 0 0; font-size: 12px; }
 .legend .leg i { width: 12px; height: 12px; border-radius: 2px; display: inline-block; margin-right: 4px; }
 .muted { color: #a99c87; font-size: 13px; }
