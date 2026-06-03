@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 import httpx
 
-from .. import backup, calc, config, quotes, schemas
+from .. import backup, calc, config, quotes, schemas, snapshot_service
 from ..database import get_db
 from ..models import AssetClass, CashFlow, PriceQuote, Security, Transaction
 from ..seed import reset_to_default
@@ -536,3 +536,23 @@ def reset(db: Session = Depends(get_db)):
         pass
     reset_to_default(db)
     return {"ok": True}
+
+
+# --------------------------------------------------------------------------- #
+# History + performance: daily NAV snapshot + time series / metrics.
+# --------------------------------------------------------------------------- #
+@router.post("/snapshot", dependencies=[Depends(require_writable)])
+def take_snapshot(db: Session = Depends(get_db)):
+    snap = snapshot_service.run_snapshot(db)
+    return {
+        "date": snap.date.isoformat(),
+        "total_assets": snap.total_assets,
+        "net_invested": snap.net_invested,
+        "benchmark": snap.benchmark,
+    }
+
+
+@router.get("/history")
+def history(range_: str = Query("all", alias="range"), db: Session = Depends(get_db)):
+    range_ = range_ if range_ in ("3m", "1y", "all") else "all"
+    return snapshot_service.build_history(db, range_=range_)
