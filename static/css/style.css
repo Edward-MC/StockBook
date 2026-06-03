@@ -481,6 +481,8 @@ table.list td.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums
 .series-toggle .chk { margin-left: 10px; font-size: 13px; cursor: pointer; }
 .trend-svg { width: 100%; height: auto; display: block; margin-top: 8px; }
 .trend-svg .axis { font-size: 11px; fill: #a99c87; }
+.trend-svg .grid { stroke: #e7ded0; stroke-width: 1; }
+.trend-svg .hint { font-size: 13px; fill: #b3a692; }
 .legend .leg { display: inline-flex; align-items: center; margin: 6px 10px 0 0; font-size: 12px; }
 .legend .leg i { width: 12px; height: 12px; border-radius: 2px; display: inline-block; margin-right: 4px; }
 .muted { color: #a99c87; font-size: 13px; }

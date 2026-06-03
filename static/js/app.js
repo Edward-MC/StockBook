@@ -1106,17 +1106,8 @@ async function renderTrends() {
 
   renderMetricCards(h.metrics);
   renderSeriesToggle();
-  // A line/stacked chart needs ≥2 points to draw anything — a single snapshot
-  // makes no segment/area. Show the accumulating-data hint instead of blank axes.
-  if (h.series.length < 2) {
-    const hint = h.series.length === 0
-      ? "攒几天就有曲线了。"
-      : "目前只有今日 1 条快照,再攒几天就有曲线了。";
-    byId("trend-chart").innerHTML = `<p class="muted">${hint}</p>`;
-    byId("trend-stack").innerHTML = "";
-    byId("trend-stack-legend").innerHTML = "";
-    return;
-  }
+  // The charts always draw a gridded frame; when there are <2 points they show a
+  // centered "accumulating" hint inside the frame rather than a blank white box.
   byId("trend-chart").innerHTML = navChartSvg(h.series);
   byId("trend-stack").innerHTML = stackChartSvg(h.series, h.class_names);
   renderStackLegend(h.series, h.class_names);
@@ -1152,8 +1143,27 @@ function renderSeriesToggle() {
 /* ---- SVG helpers (zero-Node, 纸质感自绘) ---- */
 const CHART_W = 720, CHART_H = 260, PAD = 36;
 
+// A light gridded plot frame so an empty/sparse chart still reads as a chart,
+// not a blank box. Drawn behind any data.
+function _gridFrame() {
+  const rows = 4;
+  let g = "";
+  for (let r = 0; r <= rows; r++) {
+    const y = (PAD + (CHART_H - 2 * PAD) * r / rows).toFixed(1);
+    g += `<line x1="${PAD}" y1="${y}" x2="${CHART_W - PAD}" y2="${y}" class="grid"/>`;
+  }
+  g += `<line x1="${PAD}" y1="${PAD}" x2="${PAD}" y2="${CHART_H - PAD}" class="grid"/>`;
+  return g;
+}
+function _chartSvg(inner) {
+  return `<svg viewBox="0 0 ${CHART_W} ${CHART_H}" class="trend-svg">${_gridFrame()}${inner}</svg>`;
+}
+function _centerHint(msg) {
+  return `<text x="${CHART_W / 2}" y="${CHART_H / 2}" text-anchor="middle" class="axis hint">${msg}</text>`;
+}
+
 function _scaleX(i, n) {
-  if (n <= 1) return PAD;
+  if (n <= 1) return CHART_W / 2;  // center a lone point
   return PAD + (CHART_W - 2 * PAD) * i / (n - 1);
 }
 function _scaleY(v, lo, hi) {
@@ -1167,6 +1177,11 @@ function _polyline(pts, stroke, dash) {
 }
 
 function navChartSvg(series) {
+  const n = series.length;
+  if (n < 2) {
+    return _chartSvg(_centerHint(
+      n === 0 ? "攒几天就有曲线了" : "目前只有今日 1 条快照,再攒几天就有曲线了"));
+  }
   // Normalize benchmark to start = first total_assets for visual comparison.
   const ta = series.map(s => s.total_assets);
   const ni = series.map(s => s.net_invested);
@@ -1182,9 +1197,9 @@ function navChartSvg(series) {
   if (TREND_SHOW.benchmark && firstBench) lines.push(["#5c7a6e", false, bench]);
 
   const flat = lines.flatMap(([, , arr]) => arr.filter(v => v != null));
-  if (!flat.length) return `<p class="muted">没有可显示的曲线。</p>`;
-  const lo = Math.min(...flat), hi = Math.max(...flat);
-  const n = series.length;
+  if (!flat.length) return _chartSvg(_centerHint("勾选上方序列以显示曲线"));
+  let lo = Math.min(...flat), hi = Math.max(...flat);
+  if (lo === hi) { lo -= 1; hi += 1; }  // a single distinct value → give the axis a range
 
   const polys = lines.map(([color, dash, arr]) => {
     const pts = arr.map((v, i) => v == null ? null : [_scaleX(i, n), _scaleY(v, lo, hi)])
@@ -1197,22 +1212,21 @@ function navChartSvg(series) {
     : `<text x="2" y="${PAD}" class="axis">${money(hi)}</text>
        <text x="2" y="${CHART_H - PAD}" class="axis">${money(lo)}</text>`;
   const xFirst = series[0].date, xLast = series[n - 1].date;
-  return `<svg viewBox="0 0 ${CHART_W} ${CHART_H}" class="trend-svg">
-    ${polys}
-    ${yLabels}
+  return _chartSvg(`${polys}${yLabels}
     <text x="${PAD}" y="${CHART_H - 8}" class="axis">${xFirst}</text>
-    <text x="${CHART_W - PAD}" y="${CHART_H - 8}" class="axis" text-anchor="end">${xLast}</text>
-  </svg>`;
+    <text x="${CHART_W - PAD}" y="${CHART_H - 8}" class="axis" text-anchor="end">${xLast}</text>`);
 }
 
 function stackChartSvg(series, classNames) {
+  const n = series.length;
   // Union of all class ids across the window, in a stable order.
   const ids = [];
   series.forEach(s => Object.keys(s.class_values).forEach(id => {
     if (!ids.includes(id)) ids.push(id);
   }));
-  if (!ids.length) return `<p class="muted">暂无大类市值。</p>`;
-  const n = series.length;
+  if (n < 2 || !ids.length) {
+    return _chartSvg(_centerHint(n < 2 ? "再攒几天就有堆叠图" : "暂无大类市值"));
+  }
   const totals = series.map(s => ids.reduce((a, id) => a + (s.class_values[id] || 0), 0));
   const hi = Math.max(...totals, 1);
 
@@ -1236,7 +1250,7 @@ function stackChartSvg(series, classNames) {
     return `<polygon points="${top.concat(bot).join(" ")}" fill="${fill}" opacity="0.85"/>`;
   }).join("");
 
-  return `<svg viewBox="0 0 ${CHART_W} ${CHART_H}" class="trend-svg">${areas}</svg>`;
+  return _chartSvg(areas);
 }
 
 function stackColor(id, classNames) {
