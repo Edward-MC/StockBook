@@ -1297,7 +1297,9 @@ function navChartSvg(series, bench) {
   _NAV_HOVER = { pts: hoverPts };
 
   const fmt = ms => new Date(ms).toISOString().slice(0, 10);
-  const hoverLayer = `<rect class="nav-capture" x="${PAD}" y="${PAD}" width="${(CHART_W - 2 * PAD).toFixed(1)}" height="${(CHART_H - 2 * PAD).toFixed(1)}" fill="transparent"/><g class="nav-cursor"></g>`;
+  // Full-SVG capture so fast moves never momentarily exit it (which would fire
+  // a spurious mouseleave → hide/show flicker). x is clamped to the plot in paint.
+  const hoverLayer = `<rect class="nav-capture" x="0" y="0" width="${CHART_W}" height="${CHART_H}" fill="transparent"/><g class="nav-cursor"></g>`;
   return _chartSvg(`${body}${yLabels}${endLab}
     <text x="${PAD}" y="${CHART_H - 8}" class="axis">${fmt(dmin)}</text>
     <text x="${CHART_W - PAD}" y="${CHART_H - 8}" class="axis" text-anchor="end">${fmt(dmax)}</text>
@@ -1333,9 +1335,10 @@ function wireNavHover() {
   function paint() {
     raf = 0;
     if (vbX == null) return;
+    const cx = Math.max(PAD, Math.min(CHART_W - PAD, vbX));  // clamp to plot range
     let bi = 0, bd = Infinity;
     for (let i = 0; i < pts.length; i++) {
-      const d = Math.abs(pts[i].x - vbX);
+      const d = Math.abs(pts[i].x - cx);
       if (d < bd) { bd = d; bi = i; }
     }
     if (bi === lastIdx) return;  // nearest point unchanged → skip redraw
