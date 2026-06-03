@@ -1367,23 +1367,28 @@ function wireNavHover() {
   });
 }
 
-// Always-on peak/trough markers (highest/lowest point of the primary line).
-// hoverPts: [{x, sy, val}]. Skips a mark that coincides with the end-value label.
+// Always-on peak/trough markers for the primary line. Searches only the INTERIOR
+// (drops an edge margin) so the markers land toward the middle and never collide
+// with the y-axis labels (left) or the end-value label (right). hoverPts:[{x,sy,val}].
 function _extremaMarks(pts, isMoney) {
-  if (pts.length < 3) return "";  // need a meaningful interior extreme
-  let hi = pts[0], lo = pts[0];
-  for (const p of pts) { if (p.val > hi.val) hi = p; if (p.val < lo.val) lo = p; }
-  if (hi.val === lo.val) return "";  // flat line — no extremes to call out
-  const lastX = pts[pts.length - 1].x;
+  if (pts.length < 6) return "";  // too few for a meaningful interior extreme
+  const lm = Math.max(1, Math.floor(pts.length * 0.08));   // skip the left axis-label zone
+  const rm = Math.max(1, Math.floor(pts.length * 0.12));   // skip the right end-label zone
+  const interior = pts.slice(lm, pts.length - rm);
+  if (interior.length < 2) return "";
+  let hi = interior[0], lo = interior[0];
+  for (const p of interior) { if (p.val > hi.val) hi = p; if (p.val < lo.val) lo = p; }
+  if (hi.val === lo.val) return "";  // flat — nothing to call out
   const mark = (p, above) => {
-    if (Math.abs(p.x - lastX) < 1) return "";  // the end label already shows this point
     const lab = (above ? "▴ " : "▾ ") + (isMoney ? _axisMoney(p.val) : Math.round(p.val));
     const ly = above ? Math.max(p.sy - 9, PAD + 10) : Math.min(p.sy + 17, CHART_H - PAD - 2);
     const anchor = p.x < PAD + 36 ? "start" : (p.x > CHART_W - PAD - 36 ? "end" : "middle");
     return `<circle cx="${p.x.toFixed(1)}" cy="${p.sy.toFixed(1)}" r="3" class="extreme-dot"/>` +
            `<text x="${p.x.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="${anchor}" class="extreme-val">${lab}</text>`;
   };
-  return mark(hi, true) + mark(lo, false);
+  let out = mark(hi, true);
+  if (Math.abs(hi.x - lo.x) > 6) out += mark(lo, false);  // skip if peak≈trough x
+  return out;
 }
 
 function _areaFill(pts, color) {
