@@ -103,3 +103,96 @@ def run_snapshot(db: Session) -> Snapshot:
     db.commit()
     db.refresh(snap)
     return snap
+
+
+# --------------------------------------------------------------------------- #
+# History assembly for GET /api/history.
+# --------------------------------------------------------------------------- #
+_RANGE_DAYS = {"3m": 90, "1y": 365}  # "all" => no cutoff
+
+
+def _cagr(nav: List[float], days: int) -> Optional[float]:
+    if len(nav) < 2 or nav[0] <= 0 or days <= 0:
+        return None
+    return (nav[-1] / nav[0]) ** (365.0 / days) - 1.0
+
+
+def build_history(db: Session, range_: str = "all") -> dict:
+    """Assemble the /api/history payload: filtered series + window metrics +
+    current class names. Metrics follow the selected range so the cards stay
+    consistent with the chart (spec §8). An unrecognized range_ falls back to
+    the full series (the API route validates the value)."""
+    rows = db.scalars(select(Snapshot).order_by(Snapshot.date)).all()
+    if rows:
+        cutoff_days = _RANGE_DAYS.get(range_)
+        if cutoff_days is not None:
+            cutoff = rows[-1].date - dt.timedelta(days=cutoff_days)
+            rows = [r for r in rows if r.date >= cutoff]
+
+    series = [
+        {
+            "date": r.date.isoformat(),
+            "total_assets": r.total_assets,
+            "net_invested": r.net_invested,
+            "benchmark": r.benchmark,
+            "class_values": json.loads(r.class_values or "{}"),
+        }
+        for r in rows
+    ]
+
+    metrics = _window_metrics(db, rows)
+
+    strategy = build_dashboard(db, readonly=False, hide_amounts=False)
+    class_names: Dict[str, dict] = {}
+    if strategy is not None:
+        for ac in strategy["asset_classes"]:
+            class_names[str(ac["id"])] = {"name": ac["name"], "color": ac["color"]}
+
+    return {"series": series, "metrics": metrics, "class_names": class_names}
+
+
+def _window_metrics(db: Session, rows: List[Snapshot]) -> dict:
+    none_bench = {"growth": None, "cagr": None, "max_drawdown": None}
+    if not rows:
+        return {"xirr": None, "twr": None, "max_drawdown": None,
+                "volatility": None, "benchmark": none_bench}
+    if len(rows) < 2:
+        # A single point: drawdown is well-defined (0), but XIRR/TWR/vol are not
+        # (need ≥2 points). Avoid the degenerate same-date XIRR (NPV≡0).
+        return {"xirr": None, "twr": None,
+                "max_drawdown": calc.max_drawdown([rows[0].total_assets]),
+                "volatility": None, "benchmark": none_bench}
+    nav = [r.total_assets for r in rows]
+    start_date, end_date = rows[0].date, rows[-1].date
+
+    # CFs in [start_date, end_date]. calc.twr re-applies exclusive-start; XIRR
+    # skips start-date CFs (already inside −V_start), counts the rest.
+    cfs = db.scalars(
+        select(CashFlow).where(CashFlow.date >= start_date, CashFlow.date <= end_date)
+    ).all()
+    twr_flows = [(cf.date, cf.amount if cf.direction == "in" else -cf.amount) for cf in cfs]
+
+    nav_series = [(r.date, r.total_assets) for r in rows]
+    # XIRR (investor view): window-start value out (−), deposits −, withdrawals +,
+    # window-end value in (+).
+    xirr_flows = [(start_date, -rows[0].total_assets)]
+    for cf in cfs:
+        if cf.date > start_date:  # start-date CFs are already inside −V_start
+            xirr_flows.append((cf.date, -cf.amount if cf.direction == "in" else cf.amount))
+    xirr_flows.append((end_date, rows[-1].total_assets))
+
+    bench_rows = [r for r in rows if r.benchmark is not None]
+    bench_nav = [r.benchmark for r in bench_rows]
+    bench_days = (bench_rows[-1].date - bench_rows[0].date).days if len(bench_rows) >= 2 else 0
+    bench = {
+        "growth": (bench_nav[-1] / bench_nav[0] - 1.0) if len(bench_nav) >= 2 and bench_nav[0] else None,
+        "cagr": _cagr(bench_nav, bench_days),
+        "max_drawdown": calc.max_drawdown(bench_nav) if len(bench_nav) >= 2 else None,
+    }
+    return {
+        "xirr": calc.xirr(xirr_flows),
+        "twr": calc.twr(nav_series, twr_flows),
+        "max_drawdown": calc.max_drawdown(nav),
+        "volatility": calc.annualized_volatility(nav),
+        "benchmark": bench,
+    }
