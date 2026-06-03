@@ -482,6 +482,8 @@ table.list td.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums
 .metric .m-sub { font-size: 11px; color: #a99c87; margin-top: 2px; }
 .series-toggle .chk { margin-left: 10px; font-size: 13px; cursor: pointer; }
 .trend-svg { width: 100%; height: auto; display: block; margin-top: 8px; }
+/* Knockout halo (card-bg colored) so any label stays readable over the line. */
+.trend-svg text { paint-order: stroke; stroke: var(--card, #FBF7EE); stroke-width: 3px; stroke-linejoin: round; }
 .trend-svg .axis { font-size: 11px; fill: #a99c87; }
 .trend-svg .grid { stroke: #e7ded0; stroke-width: 1; }
 .trend-svg .hint { font-size: 13px; fill: #b3a692; }
