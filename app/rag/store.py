@@ -6,13 +6,17 @@ extension. `cosine_top_k` is a pure function (unit-tested); `search` is a shim t
 delegates to `get_retriever()`. Retriever is the swap point: to scale past
 ~tens of thousands of chunks, add a new Retriever (e.g. sqlite-vec) and
 return it from `get_retriever()` — callers are unaffected.
+
+`numpy` is imported lazily (inside the two retrieval helpers) so the core app
+starts without it — the slim Docker image installs numpy only with the optional
+RAG extras (requirements-rag.txt); the RAG router still imports this module at
+startup but never touches numpy until a question is actually asked.
 """
 from __future__ import annotations
 
 import json
 from typing import Dict, List, Optional, Protocol, Tuple
 
-import numpy as np
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -26,6 +30,7 @@ def cosine_top_k(query: List[float], rows: List[Tuple[int, List[float]]],
     (id, score) descending. Zero vectors score 0 (no div-by-zero)."""
     if not rows or k <= 0:
         return []
+    import numpy as np
     q = np.asarray(query, dtype=np.float32)
     qn = np.linalg.norm(q)
     if qn == 0:
@@ -74,6 +79,7 @@ def _embedding_index(db: Session):
     max_id = db.query(func.max(KnowledgeChunk.id)).scalar() or 0
     key = (count, max_id)
     if _embed_cache["key"] != key:
+        import numpy as np
         rows = db.query(KnowledgeChunk.id, KnowledgeChunk.embedding).all()
         ids = [r[0] for r in rows]
         matrix = (np.asarray([json.loads(r[1]) for r in rows], dtype=np.float32)
