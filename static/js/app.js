@@ -99,10 +99,20 @@ function _bkSummary(list) {
   if (!list.length) return "";
   const newest = list.reduce((a, b) => (a.modified > b.modified ? a : b));
   const ts = newest.modified.slice(0, 19).replace("T", " ");
-  const hasOffsite = list.some(b => (b.destinations || []).includes("offsite"));
-  const offsiteLabel = hasOffsite
-    ? '<span>异地:<strong>已配置</strong></span>'
-    : '<span>异地:<span style="color:var(--ink-3)">未配置</span></span>';
+  const offsite = list.filter(b => (b.destinations || []).includes("offsite"));
+  const hasOffsite = offsite.length > 0;
+  // Current posture = whether the MOST-RECENT offsite backup is encrypted. The folder
+  // can hold a mix (old encrypted + new plaintext after a passphrase is removed), so
+  // "any backup encrypted" would wrongly keep showing 已加密 with no passphrase set.
+  const encNow = hasOffsite && offsite.reduce((a, b) => (a.modified > b.modified ? a : b)).encrypted;
+  let offsiteLabel;
+  if (hasOffsite && encNow) {
+    offsiteLabel = '<span>异地:<strong>已加密</strong> 🔒</span>';
+  } else if (hasOffsite) {
+    offsiteLabel = '<span>异地:<strong>已配置</strong><span style="color:var(--accent);margin-left:2px" title="异地副本未加密">⚠</span><span style="color:var(--ink-3)">(未加密)</span></span>';
+  } else {
+    offsiteLabel = '<span>异地:<span style="color:var(--ink-3)">未配置</span></span>';
+  }
   return `<div class="bk-info"><span>上次备份:${ts}</span>${offsiteLabel}</div>`;
 }
 
@@ -111,39 +121,65 @@ async function openBackupModal() {
   await renderBackupList();
 }
 
+const BK_PAGE_SIZE = 8;
+let _bkAll = [];     // full backup list (fetched once)
+let _bkPage = 0;     // current page index
+
 async function renderBackupList() {
   const box = byId("bk-list");
   try {
-    const list = await api("GET", "/api/backups");
-    if (!list.length) { box.innerHTML = `<div class="bk-empty">还没有备份。点「立即备份」创建一个。</div>`; return; }
-    box.innerHTML = _bkSummary(list) + list.map(b => {
-      const dests = b.destinations || [];
-      const hasOffsite = dests.includes("offsite");
-      // Restore button: if offsite available show a destination selector, else just restore
-      const restoreBtn = hasOffsite
-        ? `<select class="mini-btn" data-dest-sel="${b.file}" style="padding:4px 6px">
-             <option value="local">local</option>
-             <option value="offsite">offsite</option>
-           </select>
-           <button class="mini-btn primary" data-restore="${b.file}">恢复</button>`
-        : `<button class="mini-btn" data-restore="${b.file}">恢复</button>`;
-      return `<div class="bk-row">
-        <div>
-          <div class="bk-file">${b.file}</div>
-          <div class="bk-meta">${b.modified.slice(0, 19).replace("T", " ")} · ${(b.size / 1024).toFixed(0)} KB
-            &ensp;${_destBadges(dests)}&ensp;${_bkBadge(b.file)}</div>
-        </div>
-        <div class="bk-row-right">${restoreBtn}</div>
-      </div>`;
-    }).join("");
-    box.querySelectorAll("[data-restore]").forEach(btn =>
-      btn.addEventListener("click", () => {
-        const file = btn.dataset.restore;
-        const sel = box.querySelector(`[data-dest-sel="${file}"]`);
-        const dest = sel ? sel.value : "local";
-        doRestore(file, dest);
-      }));
+    _bkAll = await api("GET", "/api/backups");
+    _bkPage = 0;
+    _renderBackupPage();
   } catch (e) { box.innerHTML = `<div class="bk-empty">${e.message}</div>`; }
+}
+
+function _renderBackupPage() {
+  const box = byId("bk-list");
+  const list = _bkAll;
+  if (!list.length) { box.innerHTML = `<div class="bk-empty">还没有备份。点「立即备份」创建一个。</div>`; return; }
+  const pages = Math.ceil(list.length / BK_PAGE_SIZE);
+  _bkPage = Math.min(Math.max(_bkPage, 0), pages - 1);
+  const slice = list.slice(_bkPage * BK_PAGE_SIZE, (_bkPage + 1) * BK_PAGE_SIZE);
+  const rows = slice.map(b => {
+    const dests = b.destinations || [];
+    const hasOffsite = dests.includes("offsite");
+    // Restore button: if offsite available show a destination selector, else just restore
+    const restoreBtn = hasOffsite
+      ? `<select class="mini-btn" data-dest-sel="${b.file}" style="padding:4px 6px">
+           <option value="local">local</option>
+           <option value="offsite">offsite</option>
+         </select>
+         <button class="mini-btn primary" data-restore="${b.file}">恢复</button>`
+      : `<button class="mini-btn" data-restore="${b.file}">恢复</button>`;
+    const lockBadge = b.encrypted ? '<span class="bk-lock" title="异地副本已加密">🔒</span>' : '';
+    return `<div class="bk-row">
+      <div>
+        <div class="bk-file">${b.file}${lockBadge}</div>
+        <div class="bk-meta">${b.modified.slice(0, 19).replace("T", " ")} · ${(b.size / 1024).toFixed(0)} KB
+          &ensp;${_destBadges(dests)}&ensp;${_bkBadge(b.file)}</div>
+      </div>
+      <div class="bk-row-right">${restoreBtn}</div>
+    </div>`;
+  }).join("");
+  const pager = pages > 1
+    ? `<div class="bk-pager">
+         <button class="mini-btn" data-bk-prev ${_bkPage === 0 ? "disabled" : ""}>← 上一页</button>
+         <span class="bk-pageno">${_bkPage + 1} / ${pages}</span>
+         <button class="mini-btn" data-bk-next ${_bkPage >= pages - 1 ? "disabled" : ""}>下一页 →</button>
+       </div>`
+    : "";
+  box.innerHTML = _bkSummary(list) + rows + pager;
+  box.querySelectorAll("[data-restore]").forEach(btn =>
+    btn.addEventListener("click", () => {
+      const file = btn.dataset.restore;
+      const sel = box.querySelector(`[data-dest-sel="${file}"]`);
+      doRestore(file, sel ? sel.value : "local");
+    }));
+  const prev = box.querySelector("[data-bk-prev]");
+  if (prev) prev.addEventListener("click", () => { _bkPage--; _renderBackupPage(); });
+  const next = box.querySelector("[data-bk-next]");
+  if (next) next.addEventListener("click", () => { _bkPage++; _renderBackupPage(); });
 }
 
 async function doBackup() {
@@ -176,10 +212,15 @@ async function verifyBackups() {
         _bkVerified[r.file] = r.status;
       }
     });
-    await renderBackupList();
+    _renderBackupPage();
     const mismatches = results.filter(r => r.status === "mismatch");
     if (mismatches.length) {
-      toast(`⚠ ${mismatches.length} 个备份校验不一致`, true);
+      const decryptFails = mismatches.filter(r => (r.reason || "").includes("解密失败"));
+      if (decryptFails.length) {
+        toast("🔒 解密失败:口令错误或文件损坏 —— 先确认 .env 口令再判定损坏", true);
+      } else {
+        toast(`⚠ ${mismatches.length} 个备份校验不一致`, true);
+      }
     } else {
       toast("校验完成");
     }

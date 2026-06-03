@@ -514,10 +514,13 @@ def list_backups():
             row = seen.get(m.name)
             if row is None:
                 row = {"file": m.name, "size": m.size, "modified": m.created_at,
-                       "integrity_ok": m.integrity_ok, "destinations": []}
+                       "integrity_ok": m.integrity_ok, "destinations": [],
+                       "encrypted": False}
                 seen[m.name] = row
                 out.append(row)
             row["destinations"].append(d.name)
+            if getattr(m, "encrypted", False):
+                row["encrypted"] = True
     return out
 
 
@@ -532,6 +535,8 @@ def restore(payload: schemas.RestoreRequest):
         return backup.restore_backup(payload.file, getattr(payload, "destination", None))
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="备份文件不存在")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # --------------------------------------------------------------------------- #

@@ -161,3 +161,8 @@ def test_verify_tristate(tmp_path):
     assert backup._verify_one(d, "stockbook-x.db", allow_pull=False)["status"] == "unavailable"
     # unavailable — no manifest entry
     assert backup._verify_one(d, "nope.db", allow_pull=False)["status"] == "unavailable"
+
+
+def test_backupmeta_has_encrypted_default_false():
+    m = backup.BackupMeta("x.db", "h", 1, "2026-01-01T00:00:00", "s", True)
+    assert m.encrypted is False

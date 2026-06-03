@@ -12,3 +12,4 @@ fastembed==0.4.2
 notion-client==2.2.1
 numpy==1.26.4
 python-dotenv==1.0.1
+cryptography==48.0.0
