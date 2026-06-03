@@ -90,14 +90,18 @@
 <!-- ============ 走势 ============ -->
 <div class="panel" id="panel-trends" hidden>
   <section style="animation:none">
-    <div class="card">
-      <div class="trends-head">
-        <h2>走势 · 绩效</h2>
-        <div class="range-switch" id="trend-range">
-          <button data-range="3m">3月</button>
-          <button data-range="1y">1年</button>
-          <button data-range="all" class="active">全部</button>
-        </div>
+    <div class="card trend-top">
+      <div class="trend-headline">
+        <div class="th-label">总资产</div>
+        <div class="th-value" id="trend-total">—</div>
+        <div class="th-change" id="trend-change"></div>
+      </div>
+      <div class="range-switch" id="trend-range">
+        <button data-range="3m">3月</button>
+        <button data-range="6m">6月</button>
+        <button data-range="1y" class="active">1年</button>
+        <button data-range="3y">3年</button>
+        <button data-range="all">全部</button>
       </div>
       <div class="metric-cards" id="trend-metrics"></div>
     </div>

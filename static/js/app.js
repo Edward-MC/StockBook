@@ -1092,8 +1092,10 @@ function priceMoney(v) {
 }
 
 /* ===================== 走势 / 绩效 ===================== */
-let TREND_RANGE = "all";
+let TREND_RANGE = "1y";
 let TREND_SHOW = { total_assets: true, net_invested: true, benchmark: true };
+
+const RANGE_LABEL = { "3m": "近3月", "6m": "近6月", "1y": "近1年", "3y": "近3年", "all": "全部" };
 
 async function renderTrends() {
   byId("trend-range").querySelectorAll("button").forEach(b => {
@@ -1104,13 +1106,27 @@ async function renderTrends() {
   try { h = await api("GET", `/api/history?range=${TREND_RANGE}`); }
   catch (e) { toast(e.message, true); return; }
 
+  renderTrendHeadline(h.series);
   renderMetricCards(h.metrics);
   renderSeriesToggle();
-  // The charts always draw a gridded frame; when there are <2 points they show a
-  // centered "accumulating" hint inside the frame rather than a blank white box.
-  byId("trend-chart").innerHTML = navChartSvg(h.series);
+  byId("trend-chart").innerHTML = navChartSvg(h.series, h.benchmark_series || []);
   byId("trend-stack").innerHTML = stackChartSvg(h.series, h.class_names);
   renderStackLegend(h.series, h.class_names);
+}
+
+function renderTrendHeadline(series) {
+  const last = series.length ? series[series.length - 1].total_assets : null;
+  byId("trend-total").textContent = last == null ? "—" : money(last);
+  const chg = byId("trend-change");
+  if (series.length >= 2 && series[0].total_assets > 0) {
+    const r = series[series.length - 1].total_assets / series[0].total_assets - 1;
+    const up = r >= 0;
+    chg.className = "th-change " + (up ? "up" : "down");
+    chg.textContent = `${up ? "▲" : "▼"} ${Math.abs(r * 100).toFixed(1)}% · ${RANGE_LABEL[TREND_RANGE]}`;
+  } else {
+    chg.className = "th-change";
+    chg.textContent = RANGE_LABEL[TREND_RANGE];
+  }
 }
 
 function fmtPct(v) { return v == null ? "—" : (v * 100).toFixed(1) + "%"; }
@@ -1176,45 +1192,96 @@ function _polyline(pts, stroke, dash) {
             ${dash ? `stroke-dasharray="5 4"` : ""}/>`;
 }
 
-function navChartSvg(series) {
-  const n = series.length;
-  if (n < 2) {
-    return _chartSvg(_centerHint(
-      n === 0 ? "攒几天就有曲线了" : "目前只有今日 1 条快照,再攒几天就有曲线了"));
+function _dnum(s) { return Date.parse(s); }  // ISO date string → ms (browser)
+
+function _xScaler(dmin, dmax) {
+  if (dmin === dmax) return () => CHART_W / 2;
+  return d => PAD + (CHART_W - 2 * PAD) * (_dnum(d) - dmin) / (dmax - dmin);
+}
+
+// Map a dated value series to plot points on a given [lo,hi] vertical scale.
+function _linePts(dated, xOf, lo, hi) {
+  return dated.filter(p => p.v != null).map(p => [xOf(p.d), _scaleY(p.v, lo, hi)]);
+}
+
+function navChartSvg(series, bench) {
+  const allDates = [...series.map(s => s.date), ...bench.map(b => b.date)];
+  if (!allDates.length) return _chartSvg(_centerHint("攒几天就有曲线了"));
+  const ds = allDates.map(_dnum);
+  const dmin = Math.min(...ds), dmax = Math.max(...ds);
+  const xOf = _xScaler(dmin, dmax);
+
+  const hasPort = series.length >= 2;
+  const benchDated = bench.map(b => ({ d: b.date, v: b.close }));
+  const showBench = TREND_SHOW.benchmark && bench.length >= 2;
+
+  let body = "", yLabels = "";
+
+  if (hasPort) {
+    const ta = series.map(s => ({ d: s.date, v: s.total_assets }));
+    const ni = series.map(s => ({ d: s.date, v: s.net_invested }));
+    const vals = [];
+    if (TREND_SHOW.total_assets) vals.push(...ta.map(p => p.v).filter(v => v != null));
+    if (TREND_SHOW.net_invested) vals.push(...ni.map(p => p.v).filter(v => v != null));
+    if (!vals.length) return _chartSvg(_centerHint("勾选上方序列以显示曲线"));
+    let lo = Math.min(...vals), hi = Math.max(...vals);
+    if (lo === hi) { lo -= 1; hi += 1; }
+
+    if (TREND_SHOW.total_assets) {
+      const pts = _linePts(ta, xOf, lo, hi);
+      body += _areaFill(pts) + _polyline(pts, "#7a5c3e", false) + _endDot(pts, "#7a5c3e");
+    }
+    if (TREND_SHOW.net_invested) {
+      body += _polyline(_linePts(ni, xOf, lo, hi), "#9b8b76", true);
+    }
+    if (showBench) {  // overlay, auto-scaled to its own range (not aligned)
+      const bv = benchDated.map(p => p.v);
+      let blo = Math.min(...bv), bhi = Math.max(...bv);
+      if (blo === bhi) { blo -= 1; bhi += 1; }
+      body += _polyline(_linePts(benchDated, xOf, blo, bhi), "#5c7a6e", false);
+    }
+    yLabels = HIDE_AMT
+      ? `<text x="2" y="${PAD}" class="axis">•••</text>`
+      : `<text x="2" y="${PAD}" class="axis">${money(hi)}</text>
+         <text x="2" y="${CHART_H - PAD}" class="axis">${money(lo)}</text>`;
+  } else if (showBench) {
+    // No portfolio yet — the 沪深300 line is the main subject (its own scale).
+    const bv = benchDated.map(p => p.v);
+    let blo = Math.min(...bv), bhi = Math.max(...bv);
+    if (blo === bhi) { blo -= 1; bhi += 1; }
+    const pts = _linePts(benchDated, xOf, blo, bhi);
+    body += _areaFill(pts, "#5c7a6e") + _polyline(pts, "#5c7a6e", false) + _endDot(pts, "#5c7a6e");
+    yLabels = `<text x="2" y="${PAD}" class="axis">${Math.round(bhi)}</text>
+               <text x="2" y="${CHART_H - PAD}" class="axis">${Math.round(blo)}</text>
+               <text x="${CHART_W - PAD}" y="${PAD - 6}" class="axis hint" text-anchor="end">沪深300 点位</text>`;
+  } else {
+    return _chartSvg(_centerHint("攒几天就有曲线了"));
   }
-  // Normalize benchmark to start = first total_assets for visual comparison.
-  const ta = series.map(s => s.total_assets);
-  const ni = series.map(s => s.net_invested);
-  const benchRaw = series.map(s => s.benchmark);
-  const firstBench = benchRaw.find(v => v != null);
-  const firstTA = ta.find(v => v != null) ?? 1;  // guard against a null leading point
-  const bench = firstBench
-    ? benchRaw.map(v => v == null ? null : v / firstBench * firstTA) : benchRaw;
 
-  const lines = [];
-  if (TREND_SHOW.total_assets) lines.push(["#7a5c3e", false, ta]);
-  if (TREND_SHOW.net_invested) lines.push(["#9b8b76", true, ni]);
-  if (TREND_SHOW.benchmark && firstBench) lines.push(["#5c7a6e", false, bench]);
+  const fmt = ms => new Date(ms).toISOString().slice(0, 10);
+  return _chartSvg(`${body}${yLabels}
+    <text x="${PAD}" y="${CHART_H - 8}" class="axis">${fmt(dmin)}</text>
+    <text x="${CHART_W - PAD}" y="${CHART_H - 8}" class="axis" text-anchor="end">${fmt(dmax)}</text>`);
+}
 
-  const flat = lines.flatMap(([, , arr]) => arr.filter(v => v != null));
-  if (!flat.length) return _chartSvg(_centerHint("勾选上方序列以显示曲线"));
-  let lo = Math.min(...flat), hi = Math.max(...flat);
-  if (lo === hi) { lo -= 1; hi += 1; }  // a single distinct value → give the axis a range
+function _areaFill(pts, color) {
+  if (pts.length < 2) return "";
+  const c = color || "#7a5c3e";
+  const id = "grad" + c.replace("#", "");
+  const base = CHART_H - PAD;
+  const poly = pts.map(p => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ")
+    + ` ${pts[pts.length - 1][0].toFixed(1)},${base} ${pts[0][0].toFixed(1)},${base}`;
+  return `<defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="${c}" stop-opacity="0.26"/>
+      <stop offset="100%" stop-color="${c}" stop-opacity="0"/>
+    </linearGradient></defs>
+    <polygon points="${poly}" fill="url(#${id})"/>`;
+}
 
-  const polys = lines.map(([color, dash, arr]) => {
-    const pts = arr.map((v, i) => v == null ? null : [_scaleX(i, n), _scaleY(v, lo, hi)])
-                   .filter(Boolean);
-    return _polyline(pts, color, dash);
-  }).join("");
-
-  const yLabels = HIDE_AMT
-    ? `<text x="2" y="${PAD}" class="axis">•••</text>`
-    : `<text x="2" y="${PAD}" class="axis">${money(hi)}</text>
-       <text x="2" y="${CHART_H - PAD}" class="axis">${money(lo)}</text>`;
-  const xFirst = series[0].date, xLast = series[n - 1].date;
-  return _chartSvg(`${polys}${yLabels}
-    <text x="${PAD}" y="${CHART_H - 8}" class="axis">${xFirst}</text>
-    <text x="${CHART_W - PAD}" y="${CHART_H - 8}" class="axis" text-anchor="end">${xLast}</text>`);
+function _endDot(pts, color) {
+  if (!pts.length) return "";
+  const p = pts[pts.length - 1];
+  return `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3.5" fill="${color}"/>`;
 }
 
 function stackChartSvg(series, classNames) {

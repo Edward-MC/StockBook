@@ -464,12 +464,7 @@ table.list td.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums
 /* ---------- 走势 / 绩效 ---------- */
 #panel-trends .card + .card { margin-top: 24px; }  /* .card has no own margin */
 .trends-head { display: flex; align-items: center; justify-content: space-between; }
-.range-switch button, .series-toggle .chk { font: inherit; }
-.range-switch button {
-  border: 1px solid var(--line, #d8cfc0); background: transparent;
-  padding: 2px 10px; margin-left: 4px; border-radius: 4px; cursor: pointer;
-}
-.range-switch button.active { background: #7a5c3e; color: #fff; border-color: #7a5c3e; }
+.series-toggle .chk { font: inherit; }
 .metric-cards { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 12px; }
 .metric {
   flex: 1 1 120px; border: 1px solid var(--line, #e3dccf); border-radius: 6px;
@@ -486,3 +481,18 @@ table.list td.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums
 .legend .leg { display: inline-flex; align-items: center; margin: 6px 10px 0 0; font-size: 12px; }
 .legend .leg i { width: 12px; height: 12px; border-radius: 2px; display: inline-block; margin-right: 4px; }
 .muted { color: #a99c87; font-size: 13px; }
+
+/* Robinhood-minimal headline + pills */
+.trend-top { padding-bottom: 14px; }
+.trend-headline { margin-bottom: 10px; }
+.th-label { font-size: 12px; color: #8a7d6a; }
+.th-value { font-size: 34px; font-weight: 700; color: #4a3f30; line-height: 1.1; letter-spacing: .5px; }
+.th-change { font-size: 13px; color: #a99c87; margin-top: 2px; }
+.th-change.up { color: #b4452f; }
+.th-change.down { color: #3f7a55; }
+.range-switch { display: inline-flex; gap: 4px; margin: 6px 0 4px; }
+.range-switch button {
+  border: 1px solid var(--line, #d8cfc0); background: transparent;
+  padding: 3px 12px; border-radius: 999px; cursor: pointer; font: inherit; color: #6b5d49;
+}
+.range-switch button.active { background: #7a5c3e; color: #fff; border-color: #7a5c3e; }
