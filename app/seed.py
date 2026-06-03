@@ -11,8 +11,9 @@ from sqlalchemy import inspect, select, text
 from sqlalchemy.orm import Session
 
 from .database import Base, SessionLocal, engine
-from .models import (AssetClass, CashFlow, KnowledgeChunk, NotionSource,
-                     PriceQuote, Security, Snapshot, Strategy, Transaction)
+from .models import (AssetClass, BenchmarkPoint, CashFlow, KnowledgeChunk,
+                     NotionSource, PriceQuote, Security, Snapshot, Strategy,
+                     Transaction)
 
 # Example asset classes: name, target, band_low, band_high, color, sort_order.
 _EXAMPLE_CLASSES = [
@@ -115,7 +116,7 @@ def reset_to_default(db: Session):
     knowledge base (sources + chunks) so a reset is a true clean slate; re-add
     Notion sources and re-sync afterward."""
     for model in (Transaction, PriceQuote, Security, CashFlow, AssetClass, Strategy,
-                  KnowledgeChunk, NotionSource, Snapshot):
+                  KnowledgeChunk, NotionSource, Snapshot, BenchmarkPoint):
         db.query(model).delete()
     db.commit()
     _seed(db)

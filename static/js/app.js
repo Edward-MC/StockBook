@@ -1092,8 +1092,10 @@ function priceMoney(v) {
 }
 
 /* ===================== 走势 / 绩效 ===================== */
-let TREND_RANGE = "all";
+let TREND_RANGE = "1y";
 let TREND_SHOW = { total_assets: true, net_invested: true, benchmark: true };
+
+const RANGE_LABEL = { "3m": "近3月", "6m": "近6月", "1y": "近1年", "3y": "近3年", "all": "全部" };
 
 async function renderTrends() {
   byId("trend-range").querySelectorAll("button").forEach(b => {
@@ -1104,13 +1106,28 @@ async function renderTrends() {
   try { h = await api("GET", `/api/history?range=${TREND_RANGE}`); }
   catch (e) { toast(e.message, true); return; }
 
+  renderTrendHeadline(h.series);
   renderMetricCards(h.metrics);
   renderSeriesToggle();
-  // The charts always draw a gridded frame; when there are <2 points they show a
-  // centered "accumulating" hint inside the frame rather than a blank white box.
-  byId("trend-chart").innerHTML = navChartSvg(h.series);
+  byId("trend-chart").innerHTML = navChartSvg(h.series, h.benchmark_series || []);
+  wireNavHover();
   byId("trend-stack").innerHTML = stackChartSvg(h.series, h.class_names);
   renderStackLegend(h.series, h.class_names);
+}
+
+function renderTrendHeadline(series) {
+  const last = series.length ? series[series.length - 1].total_assets : null;
+  byId("trend-total").textContent = last == null ? "—" : money(last);
+  const chg = byId("trend-change");
+  if (series.length >= 2 && series[0].total_assets > 0) {
+    const r = series[series.length - 1].total_assets / series[0].total_assets - 1;
+    const up = r >= 0;
+    chg.className = "th-change " + (up ? "up" : "down");
+    chg.textContent = `${up ? "▲" : "▼"} ${Math.abs(r * 100).toFixed(1)}% · ${RANGE_LABEL[TREND_RANGE]}`;
+  } else {
+    chg.className = "th-change";
+    chg.textContent = RANGE_LABEL[TREND_RANGE];
+  }
 }
 
 function fmtPct(v) { return v == null ? "—" : (v * 100).toFixed(1) + "%"; }
@@ -1176,45 +1193,222 @@ function _polyline(pts, stroke, dash) {
             ${dash ? `stroke-dasharray="5 4"` : ""}/>`;
 }
 
-function navChartSvg(series) {
-  const n = series.length;
-  if (n < 2) {
-    return _chartSvg(_centerHint(
-      n === 0 ? "攒几天就有曲线了" : "目前只有今日 1 条快照,再攒几天就有曲线了"));
+function _dnum(s) { return Date.parse(s); }  // ISO date string → ms (browser)
+
+function _xScaler(dmin, dmax) {
+  if (dmin === dmax) return () => CHART_W / 2;
+  return d => PAD + (CHART_W - 2 * PAD) * (_dnum(d) - dmin) / (dmax - dmin);
+}
+
+// Map a dated value series to plot points on a given [lo,hi] vertical scale.
+function _linePts(dated, xOf, lo, hi) {
+  return dated.filter(p => p.v != null).map(p => [xOf(p.d), _scaleY(p.v, lo, hi)]);
+}
+
+// Compact axis money: 263935 → "26.4万" (fits the narrow left gutter); masked under hideAmounts.
+function _axisMoney(v) {
+  if (HIDE_AMT) return "•••";
+  const a = Math.abs(v);
+  if (a >= 1e8) return (v / 1e8).toFixed(1) + "亿";
+  if (a >= 1e4) return (v / 1e4).toFixed(1) + "万";
+  return String(Math.round(v));
+}
+
+// Value label on every gridline so the chart is readable across its whole height.
+function _yGrid(lo, hi, isMoney) {
+  const rows = 4;
+  let out = "";
+  for (let r = 0; r <= rows; r++) {
+    const v = hi - (hi - lo) * r / rows;
+    const y = PAD + (CHART_H - 2 * PAD) * r / rows;
+    out += `<text x="3" y="${(y + 3).toFixed(1)}" class="axis">${isMoney ? _axisMoney(v) : Math.round(v)}</text>`;
   }
-  // Normalize benchmark to start = first total_assets for visual comparison.
-  const ta = series.map(s => s.total_assets);
-  const ni = series.map(s => s.net_invested);
-  const benchRaw = series.map(s => s.benchmark);
-  const firstBench = benchRaw.find(v => v != null);
-  const firstTA = ta.find(v => v != null) ?? 1;  // guard against a null leading point
-  const bench = firstBench
-    ? benchRaw.map(v => v == null ? null : v / firstBench * firstTA) : benchRaw;
+  return out;
+}
 
-  const lines = [];
-  if (TREND_SHOW.total_assets) lines.push(["#7a5c3e", false, ta]);
-  if (TREND_SHOW.net_invested) lines.push(["#9b8b76", true, ni]);
-  if (TREND_SHOW.benchmark && firstBench) lines.push(["#5c7a6e", false, bench]);
+let _NAV_HOVER = null;  // {pts:[{x, sy, date, val, money}]} for the hover crosshair
 
-  const flat = lines.flatMap(([, , arr]) => arr.filter(v => v != null));
-  if (!flat.length) return _chartSvg(_centerHint("勾选上方序列以显示曲线"));
-  let lo = Math.min(...flat), hi = Math.max(...flat);
-  if (lo === hi) { lo -= 1; hi += 1; }  // a single distinct value → give the axis a range
+function navChartSvg(series, bench) {
+  const allDates = [...series.map(s => s.date), ...bench.map(b => b.date)];
+  if (!allDates.length) { _NAV_HOVER = null; return _chartSvg(_centerHint("攒几天就有曲线了")); }
+  const ds = allDates.map(_dnum);
+  const dmin = Math.min(...ds), dmax = Math.max(...ds);
+  const xOf = _xScaler(dmin, dmax);
 
-  const polys = lines.map(([color, dash, arr]) => {
-    const pts = arr.map((v, i) => v == null ? null : [_scaleX(i, n), _scaleY(v, lo, hi)])
-                   .filter(Boolean);
-    return _polyline(pts, color, dash);
-  }).join("");
+  const hasPort = series.length >= 2;
+  const benchDated = bench.map(b => ({ d: b.date, v: b.close }));
+  const showBench = TREND_SHOW.benchmark && bench.length >= 2;
 
-  const yLabels = HIDE_AMT
-    ? `<text x="2" y="${PAD}" class="axis">•••</text>`
-    : `<text x="2" y="${PAD}" class="axis">${money(hi)}</text>
-       <text x="2" y="${CHART_H - PAD}" class="axis">${money(lo)}</text>`;
-  const xFirst = series[0].date, xLast = series[n - 1].date;
-  return _chartSvg(`${polys}${yLabels}
-    <text x="${PAD}" y="${CHART_H - 8}" class="axis">${xFirst}</text>
-    <text x="${CHART_W - PAD}" y="${CHART_H - 8}" class="axis" text-anchor="end">${xLast}</text>`);
+  let body = "", primary = null, lo, hi, isMoney;
+
+  if (hasPort) {
+    const ta = series.map(s => ({ d: s.date, v: s.total_assets }));
+    const ni = series.map(s => ({ d: s.date, v: s.net_invested }));
+    const vals = [];
+    if (TREND_SHOW.total_assets) vals.push(...ta.map(p => p.v).filter(v => v != null));
+    if (TREND_SHOW.net_invested) vals.push(...ni.map(p => p.v).filter(v => v != null));
+    if (!vals.length) { _NAV_HOVER = null; return _chartSvg(_centerHint("勾选上方序列以显示曲线")); }
+    lo = Math.min(...vals); hi = Math.max(...vals); isMoney = true;
+    if (lo === hi) { lo -= 1; hi += 1; }
+
+    if (TREND_SHOW.total_assets) {
+      const pts = _linePts(ta, xOf, lo, hi);
+      body += _areaFill(pts) + _polyline(pts, "#7a5c3e", false) + _endDot(pts, "#7a5c3e");
+      primary = { dated: ta, color: "#7a5c3e" };
+    }
+    if (TREND_SHOW.net_invested) {
+      body += _polyline(_linePts(ni, xOf, lo, hi), "#9b8b76", true);
+      if (!primary) primary = { dated: ni, color: "#9b8b76" };
+    }
+    if (showBench) {  // overlay, auto-scaled to its own range (not aligned)
+      const bv = benchDated.map(p => p.v);
+      let blo = Math.min(...bv), bhi = Math.max(...bv);
+      if (blo === bhi) { blo -= 1; bhi += 1; }
+      body += _polyline(_linePts(benchDated, xOf, blo, bhi), "#5c7a6e", false);
+    }
+  } else if (showBench) {
+    // No portfolio yet — the 沪深300 line is the main subject (its own scale).
+    const bv = benchDated.map(p => p.v);
+    lo = Math.min(...bv); hi = Math.max(...bv); isMoney = false;
+    if (lo === hi) { lo -= 1; hi += 1; }
+    const pts = _linePts(benchDated, xOf, lo, hi);
+    body += _areaFill(pts, "#5c7a6e") + _polyline(pts, "#5c7a6e", false) + _endDot(pts, "#5c7a6e");
+    body += `<text x="${CHART_W - PAD}" y="${PAD - 6}" class="axis hint" text-anchor="end">沪深300 点位</text>`;
+    primary = { dated: benchDated, color: "#5c7a6e" };
+  } else {
+    _NAV_HOVER = null;
+    return _chartSvg(_centerHint("攒几天就有曲线了"));
+  }
+
+  // Gridline value labels + current-value label at the end point + hover data.
+  const yLabels = _yGrid(lo, hi, isMoney);
+  let endLab = "";
+  let hoverPts = [];
+  if (primary) {
+    const dd = primary.dated.filter(p => p.v != null);
+    hoverPts = dd.map(p => ({ x: xOf(p.d), sy: _scaleY(p.v, lo, hi), date: p.d, val: p.v, money: isMoney }));
+    if (dd.length) {
+      const lp = hoverPts[hoverPts.length - 1];
+      const lab = isMoney ? _axisMoney(dd[dd.length - 1].v) : Math.round(dd[dd.length - 1].v);
+      const ey = Math.min(Math.max(lp.sy - 8, PAD + 10), CHART_H - PAD - 4);
+      endLab = `<text x="${(lp.x - 6).toFixed(1)}" y="${ey.toFixed(1)}" text-anchor="end" class="endval" fill="${primary.color}">${lab}</text>`;
+    }
+  }
+  _NAV_HOVER = { pts: hoverPts };
+  const extrema = _extremaMarks(hoverPts, isMoney);
+
+  const fmt = ms => new Date(ms).toISOString().slice(0, 10);
+  // Full-SVG capture so fast moves never momentarily exit it (which would fire
+  // a spurious mouseleave → hide/show flicker). x is clamped to the plot in paint.
+  const hoverLayer = `<rect class="nav-capture" x="0" y="0" width="${CHART_W}" height="${CHART_H}" fill="transparent"/><g class="nav-cursor"></g>`;
+  return _chartSvg(`${body}${yLabels}${endLab}${extrema}
+    <text x="${PAD}" y="${CHART_H - 8}" class="axis">${fmt(dmin)}</text>
+    <text x="${CHART_W - PAD}" y="${CHART_H - 8}" class="axis" text-anchor="end">${fmt(dmax)}</text>
+    ${hoverLayer}`);
+}
+
+// Crosshair + value tooltip on hover (wired after the SVG is in the DOM).
+function wireNavHover() {
+  const host = byId("trend-chart");
+  const svg = host && host.querySelector("svg");
+  if (!svg || !_NAV_HOVER || !_NAV_HOVER.pts.length) return;
+  const cursor = svg.querySelector(".nav-cursor");
+  const cap = svg.querySelector(".nav-capture");
+  if (!cursor || !cap) return;
+  const pts = _NAV_HOVER.pts;
+  const NS = "http://www.w3.org/2000/svg";
+
+  // Build the cursor nodes ONCE; mousemove only mutates their attributes. Re-
+  // creating <text> per event is what caused the flicker; attribute updates don't.
+  cursor.textContent = "";
+  const line = document.createElementNS(NS, "line");
+  line.setAttribute("class", "cursor-line");
+  line.setAttribute("y1", PAD); line.setAttribute("y2", CHART_H - PAD);
+  const dot = document.createElementNS(NS, "circle");
+  dot.setAttribute("class", "cursor-dot"); dot.setAttribute("r", "4");
+  const label = document.createElementNS(NS, "text");
+  label.setAttribute("class", "cursor-val"); label.setAttribute("y", PAD + 11);
+  cursor.appendChild(line); cursor.appendChild(dot); cursor.appendChild(label);
+  cursor.style.display = "none";
+
+  // rAF-throttle so rapid mousemove coalesces to one paint per frame (no jank).
+  let raf = 0, vbX = null, lastIdx = -1;
+  function paint() {
+    raf = 0;
+    if (vbX == null) return;
+    const cx = Math.max(PAD, Math.min(CHART_W - PAD, vbX));  // clamp to plot range
+    let bi = 0, bd = Infinity;
+    for (let i = 0; i < pts.length; i++) {
+      const d = Math.abs(pts[i].x - cx);
+      if (d < bd) { bd = d; bi = i; }
+    }
+    if (bi === lastIdx) return;  // nearest point unchanged → skip redraw
+    lastIdx = bi;
+    const p = pts[bi];
+    line.setAttribute("x1", p.x.toFixed(1)); line.setAttribute("x2", p.x.toFixed(1));
+    dot.setAttribute("cx", p.x.toFixed(1)); dot.setAttribute("cy", p.sy.toFixed(1));
+    const right = p.x > CHART_W / 2;
+    label.setAttribute("x", (right ? p.x - 6 : p.x + 6).toFixed(1));
+    label.setAttribute("text-anchor", right ? "end" : "start");
+    label.textContent = `${p.date} · ${p.money ? (HIDE_AMT ? "•••" : money(p.val)) : Math.round(p.val)}`;
+    cursor.style.display = "";
+  }
+  cap.addEventListener("mousemove", e => {
+    const m = svg.getScreenCTM();
+    if (!m) return;
+    const sp = svg.createSVGPoint();
+    sp.x = e.clientX; sp.y = e.clientY;
+    vbX = sp.matrixTransform(m.inverse()).x;
+    if (!raf) raf = requestAnimationFrame(paint);
+  });
+  cap.addEventListener("mouseleave", () => {
+    vbX = null; lastIdx = -1; cursor.style.display = "none";
+    if (raf) { cancelAnimationFrame(raf); raf = 0; }
+  });
+}
+
+// Always-on peak/trough markers for the primary line. Searches only the INTERIOR
+// (drops an edge margin) so the markers land toward the middle and never collide
+// with the y-axis labels (left) or the end-value label (right). hoverPts:[{x,sy,val}].
+function _extremaMarks(pts, isMoney) {
+  if (pts.length < 6) return "";  // too few for a meaningful interior extreme
+  const lm = Math.max(1, Math.floor(pts.length * 0.08));   // skip the left axis-label zone
+  const rm = Math.max(1, Math.floor(pts.length * 0.12));   // skip the right end-label zone
+  const interior = pts.slice(lm, pts.length - rm);
+  if (interior.length < 2) return "";
+  let hi = interior[0], lo = interior[0];
+  for (const p of interior) { if (p.val > hi.val) hi = p; if (p.val < lo.val) lo = p; }
+  if (hi.val === lo.val) return "";  // flat — nothing to call out
+  const mark = (p, above) => {
+    const lab = (above ? "▴ " : "▾ ") + (isMoney ? _axisMoney(p.val) : Math.round(p.val));
+    const ly = above ? Math.max(p.sy - 9, PAD + 10) : Math.min(p.sy + 17, CHART_H - PAD - 2);
+    const anchor = p.x < PAD + 36 ? "start" : (p.x > CHART_W - PAD - 36 ? "end" : "middle");
+    return `<circle cx="${p.x.toFixed(1)}" cy="${p.sy.toFixed(1)}" r="3" class="extreme-dot"/>` +
+           `<text x="${p.x.toFixed(1)}" y="${ly.toFixed(1)}" text-anchor="${anchor}" class="extreme-val">${lab}</text>`;
+  };
+  let out = mark(hi, true);
+  if (Math.abs(hi.x - lo.x) > 6) out += mark(lo, false);  // skip if peak≈trough x
+  return out;
+}
+
+function _areaFill(pts, color) {
+  if (pts.length < 2) return "";
+  const c = color || "#7a5c3e";
+  const id = "grad" + c.replace("#", "");
+  const base = CHART_H - PAD;
+  const poly = pts.map(p => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ")
+    + ` ${pts[pts.length - 1][0].toFixed(1)},${base} ${pts[0][0].toFixed(1)},${base}`;
+  return `<defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="${c}" stop-opacity="0.26"/>
+      <stop offset="100%" stop-color="${c}" stop-opacity="0"/>
+    </linearGradient></defs>
+    <polygon points="${poly}" fill="url(#${id})"/>`;
+}
+
+function _endDot(pts, color) {
+  if (!pts.length) return "";
+  const p = pts[pts.length - 1];
+  return `<circle cx="${p[0].toFixed(1)}" cy="${p[1].toFixed(1)}" r="3.5" fill="${color}"/>`;
 }
 
 function stackChartSvg(series, classNames) {

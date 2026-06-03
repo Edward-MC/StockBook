@@ -109,30 +109,23 @@ def _add_snap(db, day, total, net, bench, cvals):
 def test_build_history_structure_and_range(client):
     db = database.SessionLocal()
     try:
-        base = dt.date(2025, 1, 1)
-        # 400 days of synthetic snapshots, value rising.
-        for i in range(0, 400, 10):
-            _add_snap(db, base + dt.timedelta(days=i), 100.0 + i, 100.0,
+        today = dt.date.today()
+        for i in range(0, 200, 10):  # snapshots across last ~200 days
+            _add_snap(db, today - dt.timedelta(days=i), 100.0 + i, 100.0,
                       4000.0 + i, {"1": 50.0 + i, "2": 50.0})
         db.commit()
 
         all_h = snapshot_service.build_history(db, range_="all")
-        assert len(all_h["series"]) == 40
+        assert len(all_h["series"]) == 20
         for key in ("xirr", "twr", "max_drawdown", "volatility", "benchmark"):
             assert key in all_h["metrics"]
+        assert "benchmark_series" in all_h
         assert isinstance(all_h["class_names"], dict)
-        # rising NAV → zero drawdown; benchmark grows 4000 → 4390 over the window.
-        assert all_h["metrics"]["max_drawdown"] == 0.0
-        assert all_h["metrics"]["benchmark"]["growth"] == pytest.approx(390.0 / 4000.0, rel=1e-6)
-        assert all_h["metrics"]["benchmark"]["cagr"] is not None
 
-        # 3m window is relative to the LAST snapshot date → fewer rows.
         m3 = snapshot_service.build_history(db, range_="3m")
+        cutoff = (today - dt.timedelta(days=90)).isoformat()
+        assert all(s["date"] >= cutoff for s in m3["series"])
         assert len(m3["series"]) < len(all_h["series"])
-        # all rows within the window
-        last = all_h["series"][-1]["date"]
-        assert all(s["date"] >= (dt.date.fromisoformat(last) - dt.timedelta(days=90)).isoformat()
-                   for s in m3["series"])
     finally:
         db.close()
 
@@ -212,6 +205,43 @@ def test_build_history_single_row_metrics(client):
         assert m["twr"] is None
         assert m["volatility"] is None
         assert m["max_drawdown"] == 0.0
+    finally:
+        db.close()
+
+
+def test_build_history_benchmark_from_table_no_snapshots(client):
+    db = database.SessionLocal()
+    try:
+        db.query(models.Snapshot).delete()
+        today = dt.date.today()
+        for i in range(0, 30, 3):  # benchmark points within window
+            db.add(models.BenchmarkPoint(date=today - dt.timedelta(days=i), close=4000.0 + i))
+        db.commit()
+        h = snapshot_service.build_history(db, range_="3m")
+        assert h["series"] == []                        # no portfolio yet
+        assert len(h["benchmark_series"]) >= 2          # but a benchmark line exists
+        b = h["metrics"]["benchmark"]
+        # ascending by date: earliest close 4027 → latest 4000 (monotonic down).
+        assert b["growth"] == pytest.approx(4000.0 / 4027.0 - 1.0, rel=1e-6)
+        assert b["max_drawdown"] == pytest.approx(27.0 / 4027.0, rel=1e-6)
+        assert b["cagr"] is not None
+        assert h["metrics"]["xirr"] is None             # portfolio metrics still None
+    finally:
+        db.close()
+
+
+def test_build_history_range_6m_3y_windows(client):
+    db = database.SessionLocal()
+    try:
+        today = dt.date.today()
+        for i in range(0, 1000, 50):
+            db.add(models.BenchmarkPoint(date=today - dt.timedelta(days=i), close=4000.0 + i))
+        db.commit()
+        h6 = snapshot_service.build_history(db, range_="6m")
+        h3y = snapshot_service.build_history(db, range_="3y")
+        assert len(h6["benchmark_series"]) < len(h3y["benchmark_series"])
+        c6 = (today - dt.timedelta(days=180)).isoformat()
+        assert all(b["date"] >= c6 for b in h6["benchmark_series"])
     finally:
         db.close()
 

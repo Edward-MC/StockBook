@@ -462,14 +462,16 @@ table.list td.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums
 @keyframes rag-indet{0%{margin-left:-40%}100%{margin-left:100%}}
 
 /* ---------- 走势 / 绩效 ---------- */
-#panel-trends .card + .card { margin-top: 24px; }  /* .card has no own margin */
-.trends-head { display: flex; align-items: center; justify-content: space-between; }
-.range-switch button, .series-toggle .chk { font: inherit; }
-.range-switch button {
-  border: 1px solid var(--line, #d8cfc0); background: transparent;
-  padding: 2px 10px; margin-left: 4px; border-radius: 4px; cursor: pointer;
+/* Roomier, softer cards: generous inner padding + a lighter hairline + more lift. */
+#panel-trends .card {
+  padding: 24px 28px;
+  border-color: #ECE3D2;
+  border-radius: 16px;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, .6) inset, 0 18px 42px -26px rgba(60, 40, 20, .35);
 }
-.range-switch button.active { background: #7a5c3e; color: #fff; border-color: #7a5c3e; }
+#panel-trends .card + .card { margin-top: 18px; }
+.trends-head { display: flex; align-items: center; justify-content: space-between; }
+.series-toggle .chk { font: inherit; }
 .metric-cards { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 12px; }
 .metric {
   flex: 1 1 120px; border: 1px solid var(--line, #e3dccf); border-radius: 6px;
@@ -480,9 +482,33 @@ table.list td.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums
 .metric .m-sub { font-size: 11px; color: #a99c87; margin-top: 2px; }
 .series-toggle .chk { margin-left: 10px; font-size: 13px; cursor: pointer; }
 .trend-svg { width: 100%; height: auto; display: block; margin-top: 8px; }
+/* Knockout halo (card-bg colored) so any label stays readable over the line. */
+.trend-svg text { paint-order: stroke; stroke: var(--card, #FBF7EE); stroke-width: 3px; stroke-linejoin: round; }
 .trend-svg .axis { font-size: 11px; fill: #a99c87; }
 .trend-svg .grid { stroke: #e7ded0; stroke-width: 1; }
 .trend-svg .hint { font-size: 13px; fill: #b3a692; }
+.trend-svg .endval { font-size: 12px; font-weight: 700; }
+.trend-svg .extreme-dot { fill: none; stroke: #8a7d6a; stroke-width: 1.5; }
+.trend-svg .extreme-val { font-size: 10.5px; font-weight: 600; fill: #8a7d6a; }
+.trend-svg .nav-capture { pointer-events: all; cursor: crosshair; }
+.trend-svg .cursor-line { stroke: #b3a692; stroke-width: 1; stroke-dasharray: 3 3; }
+.trend-svg .cursor-dot { fill: #4a3f30; }
+.trend-svg .cursor-val { font-size: 12px; font-weight: 700; fill: #4a3f30; }
 .legend .leg { display: inline-flex; align-items: center; margin: 6px 10px 0 0; font-size: 12px; }
 .legend .leg i { width: 12px; height: 12px; border-radius: 2px; display: inline-block; margin-right: 4px; }
 .muted { color: #a99c87; font-size: 13px; }
+
+/* Robinhood-minimal headline + pills */
+.trend-top { padding-bottom: 14px; }
+.trend-headline { margin-bottom: 10px; }
+.th-label { font-size: 12px; color: #8a7d6a; }
+.th-value { font-size: 34px; font-weight: 700; color: #4a3f30; line-height: 1.1; letter-spacing: .5px; }
+.th-change { font-size: 13px; color: #a99c87; margin-top: 2px; }
+.th-change.up { color: #b4452f; }
+.th-change.down { color: #3f7a55; }
+.range-switch { display: inline-flex; gap: 4px; margin: 6px 0 4px; }
+.range-switch button {
+  border: 1px solid var(--line, #d8cfc0); background: transparent;
+  padding: 3px 12px; border-radius: 999px; cursor: pointer; font: inherit; color: #6b5d49;
+}
+.range-switch button.active { background: #7a5c3e; color: #fff; border-color: #7a5c3e; }

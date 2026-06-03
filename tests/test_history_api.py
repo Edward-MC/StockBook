@@ -58,3 +58,23 @@ def test_get_history_invalid_range_falls_back(client):
     r = client.get("/api/history?range=garbage")
     assert r.status_code == 200
     assert r.json()["series"] == []
+
+
+def test_get_history_6m_window_through_api(client):
+    # Seed ~3y of dense benchmark points; 6m must return a genuinely narrower
+    # window than 3y/all — proving the route passes 6m through (not coerced to all).
+    db = database.SessionLocal()
+    try:
+        today = dt.date.today()
+        for i in range(0, 1000, 20):
+            db.add(models.BenchmarkPoint(date=today - dt.timedelta(days=i), close=4000.0 + i))
+        db.commit()
+    finally:
+        db.close()
+    n6 = len(client.get("/api/history?range=6m").json()["benchmark_series"])
+    n3y = len(client.get("/api/history?range=3y").json()["benchmark_series"])
+    n_all = len(client.get("/api/history?range=all").json()["benchmark_series"])
+    assert 0 < n6 < n3y <= n_all
+    cutoff = (today - dt.timedelta(days=180)).isoformat()
+    for b in client.get("/api/history?range=6m").json()["benchmark_series"]:
+        assert b["date"] >= cutoff

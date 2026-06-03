@@ -18,7 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from . import calc, config, quotes
-from .models import CashFlow, Security, Snapshot
+from .models import BenchmarkPoint, CashFlow, Security, Snapshot
 from .services import apply_fetched_quotes, build_dashboard, build_ledger
 
 _log = logging.getLogger(__name__)
@@ -52,6 +52,50 @@ def _fetch_benchmark() -> Optional[float]:
         return None
     q = fetched.get(code)
     return q["price"] if q else None
+
+
+_BENCHMARK_BACKFILL_DAYS = 1100  # ~3 trading years (over-ask; the API trims)
+
+
+def _upsert_benchmark_points(db: Session, points: List[Tuple[dt.date, float]]) -> int:
+    """Upsert [(date, close)] into BenchmarkPoint (one row per date). Returns the
+    number of points written. Commits."""
+    if not points:
+        return 0
+    existing = {row.date: row for row in db.scalars(select(BenchmarkPoint))}  # one SELECT
+    written = 0
+    for d, close in points:
+        if d in existing:
+            existing[d].close = close
+        else:
+            obj = BenchmarkPoint(date=d, close=close)
+            db.add(obj)
+            existing[d] = obj
+        written += 1
+    db.commit()
+    return written
+
+
+def backfill_benchmark(db: Session) -> int:
+    """Fetch ~3y of benchmark daily closes and upsert when the table is empty or
+    stale (latest point older than yesterday). Best-effort: returns 0 and logs on
+    empty config / transport failure (never raises). Reads the live DB + writes
+    BenchmarkPoint only."""
+    parsed = _parse_benchmark(config.BENCHMARK_CODE)
+    if parsed is None:
+        return 0
+    latest = db.scalars(
+        select(BenchmarkPoint.date).order_by(BenchmarkPoint.date.desc())
+    ).first()
+    if latest is not None and latest >= dt.date.today() - dt.timedelta(days=1):
+        return 0  # fresh enough — skip the network
+    code, market = parsed
+    try:
+        points = quotes.fetch_index_history(code, market, _BENCHMARK_BACKFILL_DAYS)
+    except httpx.HTTPError as exc:
+        _log.warning("benchmark backfill failed: %s", exc)
+        return 0
+    return _upsert_benchmark_points(db, points)
 
 
 def _refresh_holding_quotes(db: Session) -> None:
@@ -100,6 +144,10 @@ def run_snapshot(db: Session) -> Snapshot:
     snap.net_invested = summary["net_invested"]
     snap.benchmark = benchmark
     snap.class_values = json.dumps(class_values)
+    if benchmark is not None:
+        # snap fields are all set above, so this helper's commit flushes snap +
+        # the BenchmarkPoint together; the commit below is then a no-op.
+        _upsert_benchmark_points(db, [(today, benchmark)])
     db.commit()
     db.refresh(snap)
     return snap
@@ -108,7 +156,7 @@ def run_snapshot(db: Session) -> Snapshot:
 # --------------------------------------------------------------------------- #
 # History assembly for GET /api/history.
 # --------------------------------------------------------------------------- #
-_RANGE_DAYS = {"3m": 90, "1y": 365}  # "all" => no cutoff
+_RANGE_DAYS = {"3m": 90, "6m": 180, "1y": 365, "3y": 1095}  # "all" => no cutoff
 
 
 def _cagr(nav: List[float], days: int) -> Optional[float]:
@@ -118,16 +166,20 @@ def _cagr(nav: List[float], days: int) -> Optional[float]:
 
 
 def build_history(db: Session, range_: str = "all") -> dict:
-    """Assemble the /api/history payload: filtered series + window metrics +
-    current class names. Metrics follow the selected range so the cards stay
-    consistent with the chart (spec §8). An unrecognized range_ falls back to
-    the full series (the API route validates the value)."""
-    rows = db.scalars(select(Snapshot).order_by(Snapshot.date)).all()
-    if rows:
-        cutoff_days = _RANGE_DAYS.get(range_)
-        if cutoff_days is not None:
-            cutoff = rows[-1].date - dt.timedelta(days=cutoff_days)
-            rows = [r for r in rows if r.date >= cutoff]
+    """Assemble the /api/history payload: portfolio series (sparse, from Snapshot)
+    + dense benchmark_series (from BenchmarkPoint) + window metrics + class names.
+    The range is a date window relative to today; an unrecognized range_ falls
+    back to the full data (the API route validates the value)."""
+    cutoff = None
+    days = _RANGE_DAYS.get(range_)
+    if days is not None:
+        cutoff = dt.date.today() - dt.timedelta(days=days)
+
+    snaps = db.scalars(select(Snapshot).order_by(Snapshot.date)).all()
+    bpts = db.scalars(select(BenchmarkPoint).order_by(BenchmarkPoint.date)).all()
+    if cutoff is not None:
+        snaps = [r for r in snaps if r.date >= cutoff]
+        bpts = [b for b in bpts if b.date >= cutoff]
 
     series = [
         {
@@ -137,10 +189,10 @@ def build_history(db: Session, range_: str = "all") -> dict:
             "benchmark": r.benchmark,
             "class_values": json.loads(r.class_values or "{}"),
         }
-        for r in rows
+        for r in snaps
     ]
-
-    metrics = _window_metrics(db, rows)
+    benchmark_series = [{"date": b.date.isoformat(), "close": b.close} for b in bpts]
+    metrics = _window_metrics(db, snaps, bpts)
 
     strategy = build_dashboard(db, readonly=False, hide_amounts=False)
     class_names: Dict[str, dict] = {}
@@ -148,47 +200,49 @@ def build_history(db: Session, range_: str = "all") -> dict:
         for ac in strategy["asset_classes"]:
             class_names[str(ac["id"])] = {"name": ac["name"], "color": ac["color"]}
 
-    return {"series": series, "metrics": metrics, "class_names": class_names}
+    return {"series": series, "benchmark_series": benchmark_series,
+            "metrics": metrics, "class_names": class_names}
 
 
-def _window_metrics(db: Session, rows: List[Snapshot]) -> dict:
-    none_bench = {"growth": None, "cagr": None, "max_drawdown": None}
-    if not rows:
+def _benchmark_metrics(bpts: List[BenchmarkPoint]) -> dict:
+    if len(bpts) < 2:
+        return {"growth": None, "cagr": None, "max_drawdown": None}
+    nav = [b.close for b in bpts]
+    days = (bpts[-1].date - bpts[0].date).days
+    return {
+        "growth": (nav[-1] / nav[0] - 1.0) if nav[0] > 0 else None,
+        "cagr": _cagr(nav, days),
+        "max_drawdown": calc.max_drawdown(nav),
+    }
+
+
+def _window_metrics(db: Session, snaps: List[Snapshot],
+                    bpts: List[BenchmarkPoint]) -> dict:
+    bench = _benchmark_metrics(bpts)
+    if not snaps:
         return {"xirr": None, "twr": None, "max_drawdown": None,
-                "volatility": None, "benchmark": none_bench}
-    if len(rows) < 2:
-        # A single point: drawdown is well-defined (0), but XIRR/TWR/vol are not
-        # (need ≥2 points). Avoid the degenerate same-date XIRR (NPV≡0).
+                "volatility": None, "benchmark": bench}
+    if len(snaps) < 2:
         return {"xirr": None, "twr": None,
-                "max_drawdown": calc.max_drawdown([rows[0].total_assets]),
-                "volatility": None, "benchmark": none_bench}
-    nav = [r.total_assets for r in rows]
-    start_date, end_date = rows[0].date, rows[-1].date
+                "max_drawdown": calc.max_drawdown([snaps[0].total_assets]),
+                "volatility": None, "benchmark": bench}
+    nav = [r.total_assets for r in snaps]
+    start_date, end_date = snaps[0].date, snaps[-1].date
 
-    # CFs in [start_date, end_date]. calc.twr re-applies exclusive-start; XIRR
-    # skips start-date CFs (already inside −V_start), counts the rest.
     cfs = db.scalars(
         select(CashFlow).where(CashFlow.date >= start_date, CashFlow.date <= end_date)
     ).all()
     twr_flows = [(cf.date, cf.amount if cf.direction == "in" else -cf.amount) for cf in cfs]
 
-    nav_series = [(r.date, r.total_assets) for r in rows]
+    nav_series = [(r.date, r.total_assets) for r in snaps]
     # XIRR (investor view): window-start value out (−), deposits −, withdrawals +,
-    # window-end value in (+).
-    xirr_flows = [(start_date, -rows[0].total_assets)]
+    # window-end value in (+). Start-date cashflows are already inside −V_start.
+    xirr_flows = [(start_date, -snaps[0].total_assets)]
     for cf in cfs:
-        if cf.date > start_date:  # start-date CFs are already inside −V_start
+        if cf.date > start_date:
             xirr_flows.append((cf.date, -cf.amount if cf.direction == "in" else cf.amount))
-    xirr_flows.append((end_date, rows[-1].total_assets))
+    xirr_flows.append((end_date, snaps[-1].total_assets))
 
-    bench_rows = [r for r in rows if r.benchmark is not None]
-    bench_nav = [r.benchmark for r in bench_rows]
-    bench_days = (bench_rows[-1].date - bench_rows[0].date).days if len(bench_rows) >= 2 else 0
-    bench = {
-        "growth": (bench_nav[-1] / bench_nav[0] - 1.0) if len(bench_nav) >= 2 and bench_nav[0] else None,
-        "cagr": _cagr(bench_nav, bench_days),
-        "max_drawdown": calc.max_drawdown(bench_nav) if len(bench_nav) >= 2 else None,
-    }
     return {
         "xirr": calc.xirr(xirr_flows),
         "twr": calc.twr(nav_series, twr_flows),
@@ -210,6 +264,7 @@ def _run_once() -> None:
     from . import database
     db = database.SessionLocal()
     try:
+        backfill_benchmark(db)  # ensures ~3y history exists / stays fresh (no-op once current)
         run_snapshot(db)
     finally:
         db.close()
