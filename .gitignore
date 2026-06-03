@@ -1,6 +1,8 @@
 # Local data — your real holdings live here; never commit or delete it.
 stockbook.db
 *.db
+# local + offsite backup snapshots of real data (incl. manifest.json)
+backups/
 
 # Secrets — Notion / Anthropic keys for RAG; never commit.
 .env
@@ -23,3 +25,5 @@ __pycache__/
 .coverage.*
 .hypothesis/
 htmlcov/
+
+.superpowers/

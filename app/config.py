@@ -61,3 +61,10 @@ RAG_TOP_K = int(os.getenv("STOCKBOOK_RAG_TOP_K", "5"))
 RAG_CHUNK_CHARS = int(os.getenv("STOCKBOOK_RAG_CHUNK_CHARS", "1200"))      # chunk size when splitting
 RAG_EXCERPT_CHARS = int(os.getenv("STOCKBOOK_RAG_EXCERPT_CHARS", "800"))    # per-chunk cap in prompt
 RAG_EMBED_MODEL = os.getenv("STOCKBOOK_RAG_EMBED_MODEL", "BAAI/bge-small-zh-v1.5")
+
+# Backups (data-safety hardening). BACKUP_DIR is an offsite/synced-folder path
+# (e.g. inside iCloud/坚果云); empty = local primary only. INTERVAL 0 disables
+# the in-process auto-backup scheduler.
+BACKUP_DIR = os.getenv("STOCKBOOK_BACKUP_DIR", "")
+BACKUP_INTERVAL_HOURS = int(os.getenv("STOCKBOOK_BACKUP_INTERVAL_HOURS", "12"))
+BACKUP_KEEP = int(os.getenv("STOCKBOOK_BACKUP_KEEP", "30"))

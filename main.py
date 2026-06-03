@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app import config
+from app import backup, config
 from app.routers import api, pages, rag
 from app.seed import init_db
 
@@ -17,7 +17,11 @@ from app.seed import init_db
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    yield
+    task = backup.start_scheduler()
+    try:
+        yield
+    finally:
+        await backup.stop_scheduler(task)
 
 
 app = FastAPI(title="StockBook · 衡", lifespan=lifespan)
