@@ -6,6 +6,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app import database, models, seed
 from app import quotes
+from app import snapshot_service
 
 
 def test_benchmark_point_roundtrip(client):
@@ -79,3 +80,53 @@ def test_fetch_index_history_maps_and_parses(monkeypatch):
 def test_fetch_index_history_unmappable_code_returns_empty(monkeypatch):
     monkeypatch.setattr(quotes, "_get", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no net")))
     assert quotes.fetch_index_history("abc", "CN", 750) == []
+
+
+@pytest.fixture()
+def fake_index(monkeypatch):
+    """Stub fetch_index_history so backfill never hits the network."""
+    pts = [(dt.date(2025, 6, 1), 3900.0), (dt.date(2025, 6, 2), 3950.0),
+           (dt.date(2025, 6, 3), 3975.0)]
+    monkeypatch.setattr(snapshot_service.quotes, "fetch_index_history",
+                        lambda code, market, days: list(pts))
+    return pts
+
+
+def test_backfill_benchmark_writes_and_is_idempotent(client, fake_index):
+    db = database.SessionLocal()
+    try:
+        n = snapshot_service.backfill_benchmark(db)
+        assert n == 3
+        assert db.query(models.BenchmarkPoint).count() == 3
+        # second call upserts the same dates → still 3 rows, no duplicates
+        snapshot_service.backfill_benchmark(db)
+        assert db.query(models.BenchmarkPoint).count() == 3
+    finally:
+        db.close()
+
+
+def test_backfill_benchmark_swallows_network_error(client, monkeypatch):
+    import httpx
+
+    def _boom(code, market, days):
+        raise httpx.HTTPError("down")
+    monkeypatch.setattr(snapshot_service.quotes, "fetch_index_history", _boom)
+    db = database.SessionLocal()
+    try:
+        assert snapshot_service.backfill_benchmark(db) == 0  # no raise
+    finally:
+        db.close()
+
+
+def test_backfill_benchmark_skips_when_fresh(client, monkeypatch):
+    # Latest point is today → freshness guard returns 0 WITHOUT touching the net.
+    def _no_net(code, market, days):
+        raise AssertionError("fetch_index_history must not be called when fresh")
+    monkeypatch.setattr(snapshot_service.quotes, "fetch_index_history", _no_net)
+    db = database.SessionLocal()
+    try:
+        db.add(models.BenchmarkPoint(date=dt.date.today(), close=4000.0))
+        db.commit()
+        assert snapshot_service.backfill_benchmark(db) == 0
+    finally:
+        db.close()

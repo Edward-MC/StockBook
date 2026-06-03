@@ -18,7 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from . import calc, config, quotes
-from .models import CashFlow, Security, Snapshot
+from .models import BenchmarkPoint, CashFlow, Security, Snapshot
 from .services import apply_fetched_quotes, build_dashboard, build_ledger
 
 _log = logging.getLogger(__name__)
@@ -52,6 +52,50 @@ def _fetch_benchmark() -> Optional[float]:
         return None
     q = fetched.get(code)
     return q["price"] if q else None
+
+
+_BENCHMARK_BACKFILL_DAYS = 1100  # ~3 trading years (over-ask; the API trims)
+
+
+def _upsert_benchmark_points(db: Session, points: List[Tuple[dt.date, float]]) -> int:
+    """Upsert [(date, close)] into BenchmarkPoint (one row per date). Returns the
+    number of points written. Commits."""
+    if not points:
+        return 0
+    existing = {row.date: row for row in db.scalars(select(BenchmarkPoint))}  # one SELECT
+    written = 0
+    for d, close in points:
+        if d in existing:
+            existing[d].close = close
+        else:
+            obj = BenchmarkPoint(date=d, close=close)
+            db.add(obj)
+            existing[d] = obj
+        written += 1
+    db.commit()
+    return written
+
+
+def backfill_benchmark(db: Session) -> int:
+    """Fetch ~3y of benchmark daily closes and upsert when the table is empty or
+    stale (latest point older than yesterday). Best-effort: returns 0 and logs on
+    empty config / transport failure (never raises). Reads the live DB + writes
+    BenchmarkPoint only."""
+    parsed = _parse_benchmark(config.BENCHMARK_CODE)
+    if parsed is None:
+        return 0
+    latest = db.scalars(
+        select(BenchmarkPoint.date).order_by(BenchmarkPoint.date.desc())
+    ).first()
+    if latest is not None and latest >= dt.date.today() - dt.timedelta(days=1):
+        return 0  # fresh enough — skip the network
+    code, market = parsed
+    try:
+        points = quotes.fetch_index_history(code, market, _BENCHMARK_BACKFILL_DAYS)
+    except httpx.HTTPError as exc:
+        _log.warning("benchmark backfill failed: %s", exc)
+        return 0
+    return _upsert_benchmark_points(db, points)
 
 
 def _refresh_holding_quotes(db: Session) -> None:
@@ -100,6 +144,10 @@ def run_snapshot(db: Session) -> Snapshot:
     snap.net_invested = summary["net_invested"]
     snap.benchmark = benchmark
     snap.class_values = json.dumps(class_values)
+    if benchmark is not None:
+        # snap fields are all set above, so this helper's commit flushes snap +
+        # the BenchmarkPoint together; the commit below is then a no-op.
+        _upsert_benchmark_points(db, [(today, benchmark)])
     db.commit()
     db.refresh(snap)
     return snap
@@ -210,6 +258,7 @@ def _run_once() -> None:
     from . import database
     db = database.SessionLocal()
     try:
+        backfill_benchmark(db)  # ensures ~3y history exists / stays fresh (no-op once current)
         run_snapshot(db)
     finally:
         db.close()
