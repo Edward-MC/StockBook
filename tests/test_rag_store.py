@@ -176,3 +176,25 @@ def test_empty_crawl_does_not_wipe_existing_chunks(client, monkeypatch):
         assert after == before   # NOT wiped
     finally:
         db.close()
+
+
+def test_search_delegates_to_get_retriever(monkeypatch):
+    from app.rag import store
+
+    class FakeRetriever:
+        def search(self, db, query_vec, k=None):
+            return [{"id": 42, "text": "fake", "notion_url": "",
+                     "title_path": "", "score": 1.0}]
+    monkeypatch.setattr(store, "get_retriever", lambda: FakeRetriever())
+    out = store.search(db=None, query_vec=[0.1, 0.2])
+    assert out == [{"id": 42, "text": "fake", "notion_url": "",
+                    "title_path": "", "score": 1.0}]
+
+
+def test_get_retriever_is_singleton(monkeypatch):
+    from app.rag import store
+    monkeypatch.setattr(store, "_retriever", None)
+    r1 = store.get_retriever()
+    r2 = store.get_retriever()
+    assert r1 is r2
+    assert isinstance(r1, store.NumpyCosineRetriever)

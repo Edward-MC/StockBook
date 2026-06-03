@@ -2,14 +2,15 @@
 
 Embeddings are stored as JSON in a Text column and loaded into numpy at query
 time. For a few thousand chunks this is sub-millisecond and needs no vector
-extension. `cosine_top_k` is a pure function (unit-tested); `search` wires it
-to the DB. To scale past ~tens of thousands of chunks, swap the body of
-`search` for sqlite-vec — callers are unaffected.
+extension. `cosine_top_k` is a pure function (unit-tested); `search` is a shim that
+delegates to `get_retriever()`. Retriever is the swap point: to scale past
+~tens of thousands of chunks, add a new Retriever (e.g. sqlite-vec) and
+return it from `get_retriever()` — callers are unaffected.
 """
 from __future__ import annotations
 
 import json
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Protocol, Tuple
 
 import numpy as np
 from sqlalchemy import func
@@ -81,35 +82,57 @@ def _embedding_index(db: Session):
     return _embed_cache["ids"], _embed_cache["matrix"]
 
 
+class Retriever(Protocol):
+    def search(self, db: Session, query_vec: List[float],
+               k: Optional[int] = None) -> List[Dict]: ...
+
+
+class NumpyCosineRetriever:
+    """Default Retriever: brute-force cosine over the cached embedding matrix.
+    Future sqlite-vec backend = a new Retriever, no call-site change."""
+    def search(self, db: Session, query_vec: List[float],
+               k: Optional[int] = None) -> List[Dict]:
+        if not query_vec:
+            return []
+        if k is None:
+            k = config.RAG_TOP_K
+        ids, matrix = _embedding_index(db)
+        if matrix is None:
+            return []
+        rows = list(zip(ids, matrix))  # (id, vector) — vector is a numpy row view
+        ranked = cosine_top_k(query_vec, rows, k)
+        if not ranked:
+            return []
+        top_ids = [cid for cid, _ in ranked]
+        by_id = {c.id: c for c in
+                 db.query(KnowledgeChunk).filter(KnowledgeChunk.id.in_(top_ids)).all()}
+        out: List[Dict] = []
+        for cid, score in ranked:
+            c = by_id.get(cid)
+            if c is None:
+                continue
+            out.append({
+                "id": c.id, "text": c.text, "notion_url": c.notion_url,
+                "title_path": c.title_path, "score": score,
+            })
+        return out
+
+
+_retriever: Optional[Retriever] = None
+
+
+def get_retriever() -> Retriever:
+    """The configured retriever (singleton). Single change point for future
+    backends (e.g. sqlite-vec) — no config knob yet (only one implementation)."""
+    global _retriever
+    if _retriever is None:
+        _retriever = NumpyCosineRetriever()
+    return _retriever
+
+
 def search(db: Session, query_vec: List[float], k: Optional[int] = None) -> List[Dict]:
-    """Return the top-k chunks most similar to query_vec as dicts with text,
-    notion_url, title_path, score. An empty query vector (e.g. embedding of an
-    empty string) yields no results rather than k arbitrary zero-score hits."""
-    if not query_vec:
-        return []
-    if k is None:
-        k = config.RAG_TOP_K
-    ids, matrix = _embedding_index(db)
-    if matrix is None:
-        return []
-    rows = list(zip(ids, matrix))  # (id, vector) — vector is a numpy row view
-    ranked = cosine_top_k(query_vec, rows, k)
-    if not ranked:
-        return []
-    # Fetch only the top-k chunks' full rows (not the whole table).
-    top_ids = [cid for cid, _ in ranked]
-    by_id = {c.id: c for c in
-             db.query(KnowledgeChunk).filter(KnowledgeChunk.id.in_(top_ids)).all()}
-    out: List[Dict] = []
-    for cid, score in ranked:
-        c = by_id.get(cid)
-        if c is None:
-            continue
-        out.append({
-            "id": c.id, "text": c.text, "notion_url": c.notion_url,
-            "title_path": c.title_path, "score": score,
-        })
-    return out
+    """Shim → get_retriever().search (call sites unchanged)."""
+    return get_retriever().search(db, query_vec, k)
 
 
 def chunk_count(db: Session) -> int:

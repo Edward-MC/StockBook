@@ -76,6 +76,8 @@
 
 17. **测试基建(子项目 E)**:CI(GitHub Actions,Python 3.9 单版本)跑全套 pytest;Hypothesis 对纯函数 `calc.py` 验**核心不变量**(实际占比和≈100%、占比∈[0,100]、再平衡后落目标、`net_shares`=未平仓批次剩余之和、均价∈[买价区间]、再平衡金额符号、任意输入不崩/无 NaN、目标未分配=100−Σtarget)。每条不变量用**变异检查**确认有牙(改坏 calc 能被抓到)。覆盖率**分层 gate**:`pytest --cov=app` 出全量报告,但只对 `calc.py`+`services.py` 用 `coverage report --include=… --fail-under=95` 设硬失败线(外围网络/模型代码只报告不卡)。dev 工具(pytest-cov/coverage/hypothesis)独立于 `requirements-dev.txt`,不污染运行时 `requirements.txt`。**实际占比(I1,构造恒等 100%)与目标占比(I8,带未分配池、只在保存时归 0)是不同的量,分两条不变量**。**评估后不加 lint**:3.9 语法守卫无可靠静态工具(ruff `UP` 是旧→新升级、不报 `X|None`),且本地+CI 都跑 3.9 已是天然闸。
 
+18. **数据源接口化(子项目 B)**:三处「可替换后端」——行情源、embedding、检索——各抽出一个 `typing.Protocol` 接口(`QuoteSource`/`Embedder`/`Retriever`),现有实现包成类(`TencentSource`/`SinaSource`/`EastmoneySource`、`FastembedEmbedder`、`NumpyCosineRetriever`)。三者干的事不同、**接口各自独立**,统一的只是「Protocol + 注册/选择」这套做法。行情源用注册表 `QUOTE_SOURCES`(替代 `_FETCHERS`);embedding/检索用 `get_embedder()`/`get_retriever()` 选择器。**纯重构、零新行为**:`fetch_quotes`/`embed_texts`/`store.search` 等被消费的模块级函数保留为兼容垫片,消费方一行不改。**不加配置开关**(YAGNI):embedding/检索各仅一个实现,选择器现在直接返回默认对象,留作将来第二实现的单一改动点(如检索换 sqlite-vec)。收益:加新后端不动老代码;测试用 fake 实现替代网络/模型(`FakeQuoteSource`/`FakeEmbedder`/`FakeRetriever`),failover/检索测试不再依赖外部。
+
 ## 6. 数据模型
 两层:Security 归入 AssetClass,AssetClass 归入 Strategy。持仓由 Transaction 推导;PriceQuote 每标的一条最新价。详见 `models.py` 与设计文档 §3。
 
@@ -99,6 +101,7 @@
 - **2026-06-01** code-review 修复(数据安全/正确性):①空 crawl 不再删旧重建(否则会悄悄清空已建索引),返回 −1 让上层提示「未抓到内容」;②`/sync` 全失败/全空时返回 `error` 字段且 phase=error,前端不再无脑报「成功」;③负现金大类不再进再平衡建议(金额会无视亏空误导);④`total_assets` 改为**真实带符号合计**(与记录总账一致),另用 floored `weight_denom` 专供占比/再平衡分母(两者解耦,占比仍 0–100%);⑤每日限额改为 `allow()` 只检查、`record()` 只在成功后计数(失败调用不再烧额度);⑥`/sync` 用 `threading.Lock` 守卫 check-and-set(杜绝并发 sync 竞态)。
 - **2026-06-01** code-review 修复(清理/性能):⑦`reset_to_default` 一并清 `NotionSource`/`KnowledgeChunk`(reset 即干净起点);⑧数据库行标题改从 `databases.query` 响应直接取(`fetch_database_rows`),省掉每行一次 `pages.retrieve`;⑨`store.search` 按 `(count,max_id)` sentinel 缓存嵌入矩阵、命中后只取 top-k 文本(不再每次全表载入+解析);⑩`rag.js` 改用 `common.js` 的 `api()`(统一错误处理,校验错误数组不再显示 `[object Object]`)。
 - **2026-06-01** 测试基建(子项目 E):GitHub Actions CI(pytest + 分层覆盖率 gate)+ Hypothesis 核心不变量套件(`tests/test_calc_properties.py`,I1–I8,每条经变异检查)+ 核心模块覆盖率硬线(`calc.py`/`services.py` 合并 `--fail-under=95`,实测 99%)+ 独立 `requirements-dev.txt`/`pyproject.toml`。评估后排除 lint(3.9 守卫无可靠工具)。设计见 `docs/superpowers/specs/2026-06-01-stockbook-test-infra-design.md`,计划见 `docs/superpowers/plans/2026-06-01-test-infra.md`。
+- **2026-06-01** 数据源接口化(子项目 B):行情源/embedding/检索三处各抽 `Protocol` 接口 + 实现类 + 注册/选择(`QuoteSource`/`Embedder`/`Retriever`);`_FETCHERS`→`QUOTE_SOURCES` 注册表,`get_embedder()`/`get_retriever()` 选择器;被消费函数保留为垫片,纯重构零新行为;新增 fake 实现解耦网络/模型测试。设计见 `docs/superpowers/specs/2026-06-01-stockbook-datasource-interfaces-design.md`,计划见 `docs/superpowers/plans/2026-06-01-datasource-interfaces.md`。
 
 ## 8. 约定
 - **新增功能 = 同时更新本文档**(关键决策 / API 一览 / 功能日志)与对应测试。
