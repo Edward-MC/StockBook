@@ -6,6 +6,7 @@ import pytest
 
 from app import database, models, seed
 from app import snapshot_service
+from app import config
 
 
 def test_snapshot_table_exists_and_roundtrips(client):
@@ -213,3 +214,8 @@ def test_build_history_single_row_metrics(client):
         assert m["max_drawdown"] == 0.0
     finally:
         db.close()
+
+
+def test_start_scheduler_disabled_when_interval_zero(monkeypatch):
+    monkeypatch.setattr(config, "SNAPSHOT_INTERVAL_HOURS", 0)
+    assert snapshot_service.start_scheduler() is None

@@ -196,3 +196,57 @@ def _window_metrics(db: Session, rows: List[Snapshot]) -> dict:
         "volatility": calc.annualized_volatility(nav),
         "benchmark": bench,
     }
+
+
+# --------------------------------------------------------------------------- #
+# In-process scheduler — a SECOND independent asyncio task (mirrors app.backup;
+# different cadence: SNAPSHOT_INTERVAL_HOURS, default 24h). Started/stopped by
+# main lifespan. Catches up today's snapshot on startup, then every interval.
+# --------------------------------------------------------------------------- #
+_STARTUP_DELAY_SECS = 6.0  # let the app settle; offset from backup's 5s
+
+
+def _run_once() -> None:
+    from . import database
+    db = database.SessionLocal()
+    try:
+        run_snapshot(db)
+    finally:
+        db.close()
+
+
+async def _scheduler_loop() -> None:
+    import asyncio
+    from starlette.concurrency import run_in_threadpool
+    await asyncio.sleep(_STARTUP_DELAY_SECS)
+    while True:
+        try:
+            if not config.READONLY:
+                await run_in_threadpool(_run_once)
+        except Exception as exc:  # never let the scheduler die silently
+            _log.warning("snapshot scheduler error: %s", exc)
+        hours = config.SNAPSHOT_INTERVAL_HOURS
+        if hours <= 0:
+            return
+        await asyncio.sleep(hours * 3600)
+
+
+def start_scheduler():
+    """Return an asyncio.Task running the loop, or None if auto-snapshot off."""
+    import asyncio
+    if config.SNAPSHOT_INTERVAL_HOURS <= 0:
+        return None
+    return asyncio.create_task(_scheduler_loop())
+
+
+async def stop_scheduler(task) -> None:
+    """Cancel the snapshot scheduler (no final snapshot on shutdown — startup
+    catch-up already covers the day)."""
+    import asyncio
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
