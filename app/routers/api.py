@@ -554,5 +554,5 @@ def take_snapshot(db: Session = Depends(get_db)):
 
 @router.get("/history")
 def history(range_: str = Query("all", alias="range"), db: Session = Depends(get_db)):
-    range_ = range_ if range_ in ("3m", "1y", "all") else "all"
+    range_ = range_ if range_ in ("3m", "6m", "1y", "3y", "all") else "all"
     return snapshot_service.build_history(db, range_=range_)
