@@ -1106,8 +1106,13 @@ async function renderTrends() {
 
   renderMetricCards(h.metrics);
   renderSeriesToggle();
-  if (!h.series.length) {
-    byId("trend-chart").innerHTML = `<p class="muted">攒几天就有曲线了。</p>`;
+  // A line/stacked chart needs ≥2 points to draw anything — a single snapshot
+  // makes no segment/area. Show the accumulating-data hint instead of blank axes.
+  if (h.series.length < 2) {
+    const hint = h.series.length === 0
+      ? "攒几天就有曲线了。"
+      : "目前只有今日 1 条快照,再攒几天就有曲线了。";
+    byId("trend-chart").innerHTML = `<p class="muted">${hint}</p>`;
     byId("trend-stack").innerHTML = "";
     byId("trend-stack-legend").innerHTML = "";
     return;
