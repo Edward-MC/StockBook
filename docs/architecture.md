@@ -27,7 +27,7 @@
 | `calc.py` | **纯计算引擎**(无框架依赖):持仓、市值、占比、偏离、状态、再平衡、未分配池、均价、盈亏;**绩效纯函数**(`xirr`/`twr`/`max_drawdown`/`annualized_volatility`) |
 | `services.py` | ORM ↔ calc 的胶水:把 DB 行映射成 calc 输入,组装仪表盘载荷;`apply_fetched_quotes`(行情写回 `PriceQuote`,刷新接口与快照共用) |
 | `backup.py` | 备份引擎:快照/SHA-256/`integrity_check`、`BackupDestination` 接口(本地+同步盘异地)、编排/校验(tri-state)、进程内调度 + `python -m app.backup` CLI |
-| `snapshot_service.py` | 历史净值:`run_snapshot`(先刷行情→`build_ledger`/`build_dashboard` 取总额/各大类市值→抓基准→按 date upsert)、`build_history`(区间过滤序列 + 调 calc 组装绩效)、进程内调度(仿 backup,独立 task) |
+| `snapshot_service.py` | 历史净值:`run_snapshot`(先刷行情→`build_ledger`/`build_dashboard` 取总额/各大类市值→抓基准→按 date upsert)、`build_history`(区间过滤序列 + 调 calc 组装绩效 + 返回 `benchmark_series`)、`backfill_benchmark`(东财抓 沪深300 历史日线落 `BenchmarkPoint`,调度器启动补 + 每日补当天)、进程内调度(仿 backup,独立 task) |
 | `quotes.py` | 行情:代码→市场前缀映射、腾讯返回解析、交易时段判断(解析与网络分离,便于测试) |
 | `schemas.py` | Pydantic 请求/响应模型 |
 | `seed.py` | 建表、示例数据播种、轻量迁移(`ALTER TABLE`)、`reset_to_default` |
@@ -71,7 +71,7 @@
 - 行情:`POST /api/prices/refresh`(多源 failover,写 `source=auto`,顺带补全占位名称)。
 - 记录/现金:`GET /api/ledger`、`POST/DELETE /api/cashflows`。
 - 备份:`POST /api/backup`(强制一次,多目标)、`GET /api/backups`(带 integrity/destinations/encrypted)、`POST /api/backup/verify`(tri-state,显式会拉取异地)、`POST /api/restore`(可选 `destination`,本地/异地;解密失败→400)。
-- 历史/绩效:`POST /api/snapshot`(写,upsert 今日快照)、`GET /api/history?range=3m|1y|all`(序列 + 窗口指标 xirr/twr/max_drawdown/volatility + 基准 growth/cagr/max_drawdown + 当前大类名色;非法 range 回退 all)。
+- 历史/绩效:`POST /api/snapshot`(写,upsert 今日快照)、`GET /api/history?range=3m|6m|1y|3y|all`(持仓序列 `series` + 密集 `benchmark_series`(来自本地 `BenchmarkPoint`)+ 窗口指标 xirr/twr/max_drawdown/volatility + 基准 growth/cagr/max_drawdown(按 `BenchmarkPoint` 窗口算)+ 当前大类名色;range 为**今天相对**日期窗口,非法 range 回退 all)。
 - 重置:`POST /api/reset`(先自动备份)。
 - RAG 问答:`GET /api/rag/status`(始终可用,前端据此决定是否显示问答窗)、`POST /api/rag/ask`(三重护栏:总开关/只读/限流)、`POST /api/rag/sync`(删旧重建,不调 LLM)、`POST/DELETE /api/rag/sources`。
 
@@ -86,6 +86,8 @@
 20. **备份加密(只加密异地)**:给离机的异地备份加 Fernet 认证加密,**本地保持明文**(本地明文是「忘口令也能恢复」的安全冗余 —— 忘口令最多失去异地、不丢全部)。`EncryptedDestination` 装饰器包在 offsite `LocalDirDestination` 外:`store` 加密成 `<name>.enc`、`fetch` 解密,manifest 透传内层(逻辑名↔`.enc` 映射,`sha256` 存明文哈希)。密钥 = `scrypt(STOCKBOOK_BACKUP_PASSPHRASE, salt)`→Fernet,salt/KDF 参数存异地目录 `enc.json`(文件夹自描述,带口令即可解,跨平台,原子写)。**设口令即加密、无额外开关**(YAGNI);配了异地但没口令 → 明文 + 告警。`verify` 对加密备份**解密到本地临时文件再校验**(Fernet 认证使篡改/错口令→`mismatch`、读取失败→`unavailable`,明文绝不落进同步盘);恢复解密或干净中止(错口令→400,live 库未动)。改口令不支持轮转(改前先用旧口令把异地迁出)。 **(v2 修订)** offsite 永远包加密层、加密改为**逐备份**(有口令→`.enc` 密文、无口令→明文,均记在 `meta.encrypted`),`list()` 永远报逻辑名 → 同一备份永远合并一行(修口令删除后的重复显示,现有 `.enc` 免迁移);`verify`/`restore` 按逐文件 `meta.encrypted` 解密,加密+无口令→unavailable/400;备份列表加分页。
 
 21. **历史净值 + 绩效(走势板块)**:新增 `Snapshot` 表(每日总资产/净投入/基准点位/各大类市值 JSON),是对「**推导而非存储**」的**有意例外** —— 过去某天的市值无法用现价重算,时间序列必须落盘。`snapshot_service.run_snapshot` 捕获前**先刷持仓行情**避免记陈价(写回逻辑抽到 `services.apply_fetched_quotes`,与 `/api/prices/refresh` 共用),按 `date` upsert(每天一条/手动可刷当天)。调度**仿备份调度器另起一个独立 asyncio task**(两条 cadence 不同:备份 12h、快照 `SNAPSHOT_INTERVAL_HOURS` 默认 24h;启动补当天 + 每日,`READONLY`/间隔=0 不自动)。基准(沪深300)**正向累积**:每日顺带快照指数点位(走多源 `fetch_quotes`,抓不到存 null);`BENCHMARK_CODE` 默认 `sh000300` **带市场前缀**——指数非个股,个股 code→市场启发式会误判,故显式前缀。绩效指标是 `calc` 纯函数:**XIRR**(资金加权,二分求根;期初以窗口起点市值为一笔流出,**排除落在起点当天的现金流**避免与起点市值重复计)/**TWR**(时间加权,日快照只能把现金流归到区间端点 → 近似;极端单日跳变年化溢出→None)/**最大回撤**/**年化波动**(√252 假设规则采样,稀疏时仅供参考;单调升仅蕴含回撤=0,**不**蕴含波动=0,只有常数/等比序列波动=0);基准用 **CAGR**(纯价格序列无现金流,XIRR 无定义),并按基准自身数据跨度年化。`GET /api/history?range=` 的**指标随选中区间计算**(与图一致,区间相对最后一条快照日)。`reset_to_default` 一并清 `Snapshot`。走势页自绘 SVG(净值折线三条可切 + 大类堆叠面积,已删除大类兜底中性灰「已删除大类」),`hideAmounts` 掩码金额轴、形状/日期仍显示,零 Node。
+
+22. **沪深300 历史基准线 + 走势页重做**:新增 `BenchmarkPoint` 表(date→close)持久化东财抓来的指数日线(与 `Snapshot` 解耦——指数有用户没快照的交易日;历史收盘同属「过去不可重算」该落库)。**本地存 + 后台刷**:调度器启动 `backfill_benchmark` ~3 年(`quotes.fetch_index_history`/`parse_em_kline` 东财日线,解析/网络分离)、每日 `run_snapshot` 补当天 close;**`/api/history` 只读本地表、页面零网络**。基准线与基准指标(growth/CAGR/最大回撤)按 `BenchmarkPoint` 在所选窗口算 → ≥2 个基准点即有数,**独立于持仓快照数量**;**不与持仓对齐**(各自缩放,仅形状参照)。区间 `3月/6月/1年/3年/全部` 驱动**今天相对**日期窗口(取代原「相对最后一条快照日」)。走势页换 **Robinhood 极简风**:大数字抬头(总资产 + 区间涨跌)+ 主曲线暖色渐变填充(`<linearGradient>`)+ 真·日期轴 + 沪深300 细线(0 持仓时即主线)+ 药丸区间 + 末点圆点;空/稀疏态网格框 + 基准线兜底。`reset_to_default` 清 `BenchmarkPoint`。
 
 ## 6. 数据模型
 两层:Security 归入 AssetClass,AssetClass 归入 Strategy。持仓由 Transaction 推导;PriceQuote 每标的一条最新价。详见 `models.py` 与设计文档 §3。
@@ -115,6 +117,7 @@
 - **2026-06-02** 备份加密(只加密异地):`EncryptedDestination`(Fernet + scrypt 口令派生)包 offsite,`<name>.enc` + 自描述 `enc.json`(原子写);设 `STOCKBOOK_BACKUP_PASSPHRASE` 即加密、否则明文+告警;verify 解密后再校验(篡改/错口令→mismatch、读失败→unavailable,明文不落同步盘)、恢复错口令→400 且 live 不动;前端加锁标记 🔒。设计见 `docs/superpowers/specs/2026-06-02-stockbook-backup-encryption-design.md`,计划见 `docs/superpowers/plans/2026-06-02-backup-encryption.md`。
 - **2026-06-02** 备份加密 v2:offsite 永远包加密层、加密逐备份(有口令 `.enc`、无口令明文,记 `meta.encrypted`),`list()` 报逻辑名永远合并一行(修口令删除后重复、现有 `.enc` 免迁移);verify/restore 按逐文件标记解密;备份列表加分页。计划见 `docs/superpowers/plans/2026-06-02-backup-encryption-v2.md`。
 - **2026-06-02** 历史净值 + 绩效分析(走势板块):新 `Snapshot` 表(推导而非存储的有意例外)+ `app/snapshot_service.py`(run_snapshot 先刷价→捕获→按 date upsert;build_history 区间+指标)+ `calc` 四个绩效纯函数(XIRR/TWR/最大回撤/年化波动,配 Hypothesis 不变量、每条变异检查)+ 进程内每日调度(仿备份、独立 task)+ 基准沪深300 正向累积(`sh000300` 带前缀绕开个股映射)+ 新 tab「走势」(指标卡 + 可切 SVG 净值线 + 大类堆叠,零 Node,headless-Chrome 验证)+ 配置 `BENCHMARK_CODE`/`SNAPSHOT_INTERVAL_HOURS`。行情写回逻辑抽 `services.apply_fetched_quotes`(刷新接口与快照共用,DRY)。设计见 `docs/superpowers/specs/2026-06-02-stockbook-history-performance-design.md`,计划见 `docs/superpowers/plans/2026-06-02-history-performance.md`。
+- **2026-06-02** 沪深300 历史基准线 + 走势页重做:`BenchmarkPoint` 表本地存指数日线(东财 `fetch_index_history`/`parse_em_kline`,解析网络分离)+ `backfill_benchmark`(调度器启动补 ~3 年 + 每日补当天,页面只读表)+ `build_history` 返回 `benchmark_series`、基准指标按表算、区间今天相对(加 6m/3y)+ 走势页 Robinhood 极简风(大数字抬头 + 渐变填充主线 + 沪深300 默认线 + 药丸区间,headless 双场景验证)。基准独立于持仓、不对齐。设计见 `docs/superpowers/specs/2026-06-02-stockbook-benchmark-history-and-trends-redesign-design.md`,计划见 `docs/superpowers/plans/2026-06-02-benchmark-history-and-trends-redesign.md`。
 
 ## 8. 约定
 - **新增功能 = 同时更新本文档**(关键决策 / API 一览 / 功能日志)与对应测试。
