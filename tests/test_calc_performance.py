@@ -57,6 +57,13 @@ def test_twr_overflow_returns_none():
     assert r is None
 
 
+def test_twr_skips_non_positive_begin_segment():
+    # A segment whose begin value is <= 0 (e.g. a negative-cash day) is skipped;
+    # the remaining valid 100→110 segment still yields a positive TWR.
+    r = twr([(d(0), -10.0), (d(10), 100.0), (d(20), 110.0)], [])
+    assert r is not None and r > 0
+
+
 # ------------------------- max_drawdown --------------------------------- #
 def test_max_drawdown_basic():
     # peak 100 → trough 60 → recover: max DD = 40%.
