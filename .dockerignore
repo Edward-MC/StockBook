@@ -1,0 +1,38 @@
+# 绝不让真实数据 / 密钥 / 本地产物进镜像层。
+# 真实持仓库与备份(gitignore 同款,双重保险)
+stockbook.db
+*.db
+backups/
+
+# 密钥
+.env
+.env.*
+
+# 本地虚拟环境与缓存
+.venv/
+__pycache__/
+*.pyc
+
+# 测试 / 覆盖率产物
+.coverage
+.coverage.*
+.hypothesis/
+.pytest_cache/
+htmlcov/
+
+# 版本库与 IDE / 工具配置
+.git/
+.github/
+.idea/
+.claude/
+.superpowers/
+
+# 文档与评估材料(不需要进运行镜像)
+docs/
+*.pdf
+AI_WORKFLOW.md
+
+# Docker 自身
+Dockerfile
+docker-compose.yml
+.dockerignore

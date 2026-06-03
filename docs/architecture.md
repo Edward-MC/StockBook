@@ -10,7 +10,7 @@
 ## 2. 技术栈 / Infra
 - **语言/运行时**:Python 3.9。
 - **后端**:FastAPI(`0.128`)+ SQLAlchemy 2.0(声明式 `Mapped`)+ Pydantic v2 校验。
-- **数据库**:SQLite 单文件(`stockbook.db`,项目根)。零运维、可打包给别人 `pip install -r requirements.txt && uvicorn main:app`。
+- **数据库**:SQLite 单文件(`stockbook.db`,项目根)。零运维、可打包给别人 `pip install -r requirements.txt && uvicorn main:app`,或 **`docker compose up` 一条命令**(见决策 23、`README.md` 运行节)。
 - **前端**:Jinja2 渲染外壳 + 原生 JS(`fetch` 调 JSON API)+ 一套「衡」纸质感 CSS。**零 Node 构建**。
 - **外部行情**:腾讯 `qt.gtimg.cn`(纯文本、免密钥、可批量),通过 `httpx` 拉取。
 - **测试**:pytest + FastAPI TestClient(`tests/` 每个用例用 `tmp_path` 独立 SQLite,互不污染)。
@@ -89,6 +89,8 @@
 
 22. **沪深300 历史基准线 + 走势页重做**:新增 `BenchmarkPoint` 表(date→close)持久化东财抓来的指数日线(与 `Snapshot` 解耦——指数有用户没快照的交易日;历史收盘同属「过去不可重算」该落库)。**本地存 + 后台刷**:调度器启动 `backfill_benchmark` ~3 年(`quotes.fetch_index_history`/`parse_em_kline` 东财日线,解析/网络分离)、每日 `run_snapshot` 补当天 close;**`/api/history` 只读本地表、页面零网络**。基准线与基准指标(growth/CAGR/最大回撤)按 `BenchmarkPoint` 在所选窗口算 → ≥2 个基准点即有数,**独立于持仓快照数量**;**不与持仓对齐**(各自缩放,仅形状参照)。区间 `3月/6月/1年/3年/全部` 驱动**今天相对**日期窗口(取代原「相对最后一条快照日」)。走势页换 **Robinhood 极简风**:大数字抬头(总资产 + 区间涨跌)+ 主曲线暖色渐变填充(`<linearGradient>`)+ 真·日期轴 + 沪深300 细线(0 持仓时即主线)+ 药丸区间 + 末点圆点;空/稀疏态网格框 + 基准线兜底。`reset_to_default` 清 `BenchmarkPoint`。
 
+23. **Docker 打包 + 依赖分层(分享给他人)**:在不重构应用的前提下套一层「钉死 Python 3.9 + 一条命令」的壳——`Dockerfile`(`python:3.9-slim`)+ `docker-compose.yml`(端口 8000 + **命名卷 `stockbook-data`** 持久化 `/data/stockbook.db`)+ `.dockerignore`(挡 `*.db`/`backups/`/`.env`,真实数据与密钥**绝不进镜像层**)。**依赖三分**:`requirements.txt` 瘦身为核心运行时,**RAG 专属重依赖**(`fastembed`/`numpy`/`anthropic`/`notion-client`,尤其 `fastembed→onnxruntime` 是镜像最大头)拆到 `requirements-rag.txt`;`requirements-dev.txt` 引后者(测试仍覆盖 RAG 路径)。镜像默认精简,RAG 走**构建参数** `--build-arg INSTALL_RAG=1`(单一开关,不写第二个 Dockerfile)。配套改动:`store.py` 的 `import numpy` 下沉为**惰性**(RAG 路由在启动时仍被 `include_router`,但不装 numpy 也能起——`fastembed`/`anthropic`/`notion_client` 本就已惰性);compose **默认不挂 `env_file`**,**无 `.env` 也能 `docker compose up`**(核心零配置,只有 RAG 默认关;不用 `required: false` 是因目标机 Compose v2.12 不支持该语法,改默认不挂、RAG 用户按注释取消一行普通 `env_file`,兼容所有版本);`.env.example` 进仓库(空模板,密钥留空)。首启 `init_db()` 自动 seed 示例策略 → 开箱即见有数据的仪表盘。保留方式 B(`pip install + uvicorn`)作后备。**不引入 Postgres/多服务**:单 SQLite + 单 service,契合 local-first,compose 只负责「钉环境 + 一条命令」。
+
 ## 6. 数据模型
 两层:Security 归入 AssetClass,AssetClass 归入 Strategy。持仓由 Transaction 推导;PriceQuote 每标的一条最新价。详见 `models.py` 与设计文档 §3。
 
@@ -119,6 +121,7 @@
 - **2026-06-02** 历史净值 + 绩效分析(走势板块):新 `Snapshot` 表(推导而非存储的有意例外)+ `app/snapshot_service.py`(run_snapshot 先刷价→捕获→按 date upsert;build_history 区间+指标)+ `calc` 四个绩效纯函数(XIRR/TWR/最大回撤/年化波动,配 Hypothesis 不变量、每条变异检查)+ 进程内每日调度(仿备份、独立 task)+ 基准沪深300 正向累积(`sh000300` 带前缀绕开个股映射)+ 新 tab「走势」(指标卡 + 可切 SVG 净值线 + 大类堆叠,零 Node,headless-Chrome 验证)+ 配置 `BENCHMARK_CODE`/`SNAPSHOT_INTERVAL_HOURS`。行情写回逻辑抽 `services.apply_fetched_quotes`(刷新接口与快照共用,DRY)。设计见 `docs/superpowers/specs/2026-06-02-stockbook-history-performance-design.md`,计划见 `docs/superpowers/plans/2026-06-02-history-performance.md`。
 - **2026-06-02** 备份恢复路径边界用例(`tests/test_backup_restore.py`):补 `restore_backup` 此前未直测的「丢数据级」边界——①异地副本未物化(拉不下来)→ `FileNotFoundError`、②显式 `destination` 不含该文件 → `FileNotFoundError`(两者均断言 live 库未动)、③**明文备份损坏 → 完整性兜底中止、live 库不被破坏**(此前仅测加密变体)、④恢复可逆:恢复前自动快照当前态、该快照本身可再恢复、⑤内容级往返:恢复找回具体行值(现价)而非仅大类数量。单元级用例打桩 `live_db_path`/`get_destinations`(在到达 `create_schema` 前即抛错,不碰真实/默认引擎),API 级用例走隔离 `client`。
 - **2026-06-02** 端到端系统测试(`tests/test_system_e2e.py`):通过公开 HTTP 接口(TestClient)走 8 条完整用户旅程,断言**跨步骤一致的真实衍生数值**与**状态转移**(穿过 router→services→calc→SQLite),与 `test_api.py`(单端点集成)互补不重复。旅程:①持仓全生命周期(建类→按 code 买入→设价→改批次→批次卖出→删除守卫,逐步手算成本/市值/盈亏/剩余/已实现)②目标校验 + 再平衡一致性(over/under 与 band 对应、amount/edge 符号、`deviating_count`==建议数)+ 标记再平衡 ③现金大类 + 记账(现金余额=Σ注入−Σ移出+Σ卖−Σ买、净投入/总资产/总收益/已实现口径)④行情多源 failover(`_FakeSource` 打桩首源抛错次源接管、命中源、unresolved、写 source=auto、全挂→502)⑤数据安全闭环(备份→改→恢复→tri-state verify→reset 自动备份;加密异地正确口令→ok、错口令→400 且 live 不动)⑥只读守卫(写 403/读 200)⑦RAG(打桩 Notion 抓取/embedder/Anthropic 客户端,sync 入库→ask 命中检索 + prompt 含持仓快照与原文链接 + 引用;关→403、只读→403、超限→429)⑧走势/绩效(空表→空 series+None 指标;`/api/snapshot` 写当天;受控 100→200/365 天无现金流序列 pin xirr≈twr≈1.0、max_drawdown=0)。确定性:全部手动现价,网络/LLM 一律打桩。
+- **2026-06-02** Docker 打包 + 依赖分层(便于分享给面试官/他人):新增 `Dockerfile`(python:3.9-slim,`ARG INSTALL_RAG` 控制是否装 RAG 重依赖)+ `docker-compose.yml`(命名卷持久化 + 默认不挂 `env_file`,无 `.env` 也能 `docker compose up`,RAG 用户按注释取消一行;实测镜像 212MB)+ `.dockerignore`(真实 `*.db`/`backups/`/`.env` 不进镜像)+ `.env.example`(空模板);`requirements.txt` 瘦身、RAG 重依赖拆到新 `requirements-rag.txt`(dev 引它以覆盖测试),`store.py` 的 numpy 改惰性 import 使精简镜像无 numpy 也能启动。保留 `pip install + uvicorn` 作后备路径。纯打包/分层,应用逻辑零改动(除 numpy 惰性化的纯搬运)。
 - **2026-06-02** 沪深300 历史基准线 + 走势页重做:`BenchmarkPoint` 表本地存指数日线(东财 `fetch_index_history`/`parse_em_kline`,解析网络分离)+ `backfill_benchmark`(调度器启动补 ~3 年 + 每日补当天,页面只读表)+ `build_history` 返回 `benchmark_series`、基准指标按表算、区间今天相对(加 6m/3y)+ 走势页 Robinhood 极简风(大数字抬头 + 渐变填充主线 + 沪深300 默认线 + 药丸区间,headless 双场景验证)。基准独立于持仓、不对齐。设计见 `docs/superpowers/specs/2026-06-02-stockbook-benchmark-history-and-trends-redesign-design.md`,计划见 `docs/superpowers/plans/2026-06-02-benchmark-history-and-trends-redesign.md`。
 
 ## 8. 约定

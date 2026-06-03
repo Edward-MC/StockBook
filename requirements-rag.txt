@@ -1,0 +1,10 @@
+# RAG 问答(Phase 2)专属依赖 —— 核心追踪器不需要它们。
+# 这些是镜像里最重的部分(尤其 fastembed → onnxruntime),所以默认不装:
+#   - 本地 `pip install -r requirements.txt` 只跑核心功能;要 RAG 再 `pip install -r requirements-rag.txt`。
+#   - Docker 镜像默认精简,构建时传 `--build-arg INSTALL_RAG=1` 才装这一层(见 Dockerfile)。
+# 装完还需在 .env 里设 STOCKBOOK_RAG_ENABLED=1 + NOTION_TOKEN + ANTHROPIC_API_KEY 才真正启用。
+-r requirements.txt
+anthropic==0.105.2
+fastembed==0.4.2
+notion-client==2.2.1
+numpy==1.26.4

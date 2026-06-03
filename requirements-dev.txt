@@ -1,5 +1,7 @@
 # 开发期工具(测试 + 覆盖率)。运行时依赖见 requirements.txt,本文件不污染它。
--r requirements.txt
+# 引 requirements-rag.txt(它又引 requirements.txt),让测试覆盖 RAG 代码路径
+# (numpy/fastembed/anthropic/notion-client),CI 与本地都跑全量。
+-r requirements-rag.txt
 pytest-cov==5.0.0
 coverage==7.6.1
 hypothesis==6.112.2

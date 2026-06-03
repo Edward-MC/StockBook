@@ -1,0 +1,27 @@
+# 一条命令起 StockBook:  docker compose up
+# 然后浏览器开 http://localhost:8000 —— 首启自动建库 + 预置示例策略,开箱即见仪表盘。
+# 不需要任何 .env 也能跑(核心追踪器全功能,只有 RAG 问答默认关)。
+#
+# 要启用 Notion 知识库问答:
+#   1) 把下面 build 的 INSTALL_RAG 改成 "1"(或 build 时传 --build-arg INSTALL_RAG=1);
+#   2) 复制 .env.example 为 .env,填 STOCKBOOK_RAG_ENABLED=1 + NOTION_TOKEN + ANTHROPIC_API_KEY;
+#   3) docker compose up --build。
+services:
+  stockbook:
+    build:
+      context: .
+      args:
+        INSTALL_RAG: "0"        # 改 "1" 把 RAG 依赖装进镜像
+    ports:
+      - "8000:8000"
+    volumes:
+      - stockbook-data:/data    # SQLite 库 + 容器内备份持久化(命名卷,重启不丢)
+    # 默认不挂 env_file —— 无 .env 也能 `docker compose up`,核心追踪器全功能。
+    # 启用 RAG / 备份配置时:先 `cp .env.example .env` 填好,再取消下面两行注释
+    #(普通 env_file 形式,兼容所有 Compose 版本;.env 必须存在,否则报错)。
+    # env_file:
+    #   - .env
+    restart: unless-stopped
+
+volumes:
+  stockbook-data:
