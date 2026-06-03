@@ -39,14 +39,15 @@ function initTabs() {
   });
   // Deep-link / reload-persist the active tab via the URL hash.
   const hash = (location.hash || "").replace("#", "");
-  switchTab(["holdings", "records"].includes(hash) ? hash : "dashboard");
+  switchTab(["holdings", "records", "trends"].includes(hash) ? hash : "dashboard");
 }
-const TABS = ["dashboard", "holdings", "records"];
+const TABS = ["dashboard", "holdings", "records", "trends"];
 function switchTab(name) {
   document.querySelectorAll(".tab").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
   TABS.forEach(t => { document.getElementById(`panel-${t}`).hidden = name !== t; });
   if (history.replaceState) history.replaceState(null, "", name === "dashboard" ? location.pathname + location.search : `#${name}`);
   if (name === "records") renderRecords();
+  if (name === "trends") renderTrends();
 }
 
 /* ---------- event wiring ---------- */
@@ -1088,4 +1089,185 @@ function priceMoney(v) {
   if (HIDE_AMT) return "•••••";
   if (v == null) return "—";
   return "¥" + (+v).toFixed(3).replace(/\.?0+$/, "");
+}
+
+/* ===================== 走势 / 绩效 ===================== */
+let TREND_RANGE = "all";
+let TREND_SHOW = { total_assets: true, net_invested: true, benchmark: true };
+
+async function renderTrends() {
+  byId("trend-range").querySelectorAll("button").forEach(b => {
+    b.classList.toggle("active", b.dataset.range === TREND_RANGE);
+    b.onclick = () => { TREND_RANGE = b.dataset.range; renderTrends(); };
+  });
+  let h;
+  try { h = await api("GET", `/api/history?range=${TREND_RANGE}`); }
+  catch (e) { toast(e.message, true); return; }
+
+  renderMetricCards(h.metrics);
+  renderSeriesToggle();
+  // The charts always draw a gridded frame; when there are <2 points they show a
+  // centered "accumulating" hint inside the frame rather than a blank white box.
+  byId("trend-chart").innerHTML = navChartSvg(h.series);
+  byId("trend-stack").innerHTML = stackChartSvg(h.series, h.class_names);
+  renderStackLegend(h.series, h.class_names);
+}
+
+function fmtPct(v) { return v == null ? "—" : (v * 100).toFixed(1) + "%"; }
+
+function renderMetricCards(m) {
+  const b = m.benchmark || {};
+  const cards = [
+    ["年化 (XIRR)", fmtPct(m.xirr), "资金加权,口径见说明"],
+    ["TWR", fmtPct(m.twr), "时间加权(日快照近似)"],
+    ["最大回撤", fmtPct(m.max_drawdown), `基准 ${fmtPct(b.max_drawdown)}`],
+    ["年化波动", fmtPct(m.volatility), "采样稀疏仅供参考"],
+    ["基准年化 (CAGR)", fmtPct(b.cagr), "沪深300,非 XIRR"],
+  ];
+  byId("trend-metrics").innerHTML = cards.map(([t, v, sub]) =>
+    `<div class="metric"><div class="m-label">${t}</div>
+       <div class="m-value">${v}</div><div class="m-sub">${sub}</div></div>`).join("");
+}
+
+function renderSeriesToggle() {
+  const opts = [
+    ["total_assets", "总资产"], ["net_invested", "净投入"], ["benchmark", "基准"],
+  ];
+  byId("trend-series-toggle").innerHTML = opts.map(([k, label]) =>
+    `<label class="chk"><input type="checkbox" data-k="${k}" ${TREND_SHOW[k] ? "checked" : ""}>${label}</label>`
+  ).join("");
+  byId("trend-series-toggle").querySelectorAll("input").forEach(inp =>
+    inp.onchange = () => { TREND_SHOW[inp.dataset.k] = inp.checked; renderTrends(); });
+}
+
+/* ---- SVG helpers (zero-Node, 纸质感自绘) ---- */
+const CHART_W = 720, CHART_H = 260, PAD = 36;
+
+// A light gridded plot frame so an empty/sparse chart still reads as a chart,
+// not a blank box. Drawn behind any data.
+function _gridFrame() {
+  const rows = 4;
+  let g = "";
+  for (let r = 0; r <= rows; r++) {
+    const y = (PAD + (CHART_H - 2 * PAD) * r / rows).toFixed(1);
+    g += `<line x1="${PAD}" y1="${y}" x2="${CHART_W - PAD}" y2="${y}" class="grid"/>`;
+  }
+  g += `<line x1="${PAD}" y1="${PAD}" x2="${PAD}" y2="${CHART_H - PAD}" class="grid"/>`;
+  return g;
+}
+function _chartSvg(inner) {
+  return `<svg viewBox="0 0 ${CHART_W} ${CHART_H}" class="trend-svg">${_gridFrame()}${inner}</svg>`;
+}
+function _centerHint(msg) {
+  return `<text x="${CHART_W / 2}" y="${CHART_H / 2}" text-anchor="middle" class="axis hint">${msg}</text>`;
+}
+
+function _scaleX(i, n) {
+  if (n <= 1) return CHART_W / 2;  // center a lone point
+  return PAD + (CHART_W - 2 * PAD) * i / (n - 1);
+}
+function _scaleY(v, lo, hi) {
+  if (hi === lo) return CHART_H - PAD;
+  return CHART_H - PAD - (CHART_H - 2 * PAD) * (v - lo) / (hi - lo);
+}
+function _polyline(pts, stroke, dash) {
+  const d = pts.map(p => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
+  return `<polyline points="${d}" fill="none" stroke="${stroke}" stroke-width="2"
+            ${dash ? `stroke-dasharray="5 4"` : ""}/>`;
+}
+
+function navChartSvg(series) {
+  const n = series.length;
+  if (n < 2) {
+    return _chartSvg(_centerHint(
+      n === 0 ? "攒几天就有曲线了" : "目前只有今日 1 条快照,再攒几天就有曲线了"));
+  }
+  // Normalize benchmark to start = first total_assets for visual comparison.
+  const ta = series.map(s => s.total_assets);
+  const ni = series.map(s => s.net_invested);
+  const benchRaw = series.map(s => s.benchmark);
+  const firstBench = benchRaw.find(v => v != null);
+  const firstTA = ta.find(v => v != null) ?? 1;  // guard against a null leading point
+  const bench = firstBench
+    ? benchRaw.map(v => v == null ? null : v / firstBench * firstTA) : benchRaw;
+
+  const lines = [];
+  if (TREND_SHOW.total_assets) lines.push(["#7a5c3e", false, ta]);
+  if (TREND_SHOW.net_invested) lines.push(["#9b8b76", true, ni]);
+  if (TREND_SHOW.benchmark && firstBench) lines.push(["#5c7a6e", false, bench]);
+
+  const flat = lines.flatMap(([, , arr]) => arr.filter(v => v != null));
+  if (!flat.length) return _chartSvg(_centerHint("勾选上方序列以显示曲线"));
+  let lo = Math.min(...flat), hi = Math.max(...flat);
+  if (lo === hi) { lo -= 1; hi += 1; }  // a single distinct value → give the axis a range
+
+  const polys = lines.map(([color, dash, arr]) => {
+    const pts = arr.map((v, i) => v == null ? null : [_scaleX(i, n), _scaleY(v, lo, hi)])
+                   .filter(Boolean);
+    return _polyline(pts, color, dash);
+  }).join("");
+
+  const yLabels = HIDE_AMT
+    ? `<text x="2" y="${PAD}" class="axis">•••</text>`
+    : `<text x="2" y="${PAD}" class="axis">${money(hi)}</text>
+       <text x="2" y="${CHART_H - PAD}" class="axis">${money(lo)}</text>`;
+  const xFirst = series[0].date, xLast = series[n - 1].date;
+  return _chartSvg(`${polys}${yLabels}
+    <text x="${PAD}" y="${CHART_H - 8}" class="axis">${xFirst}</text>
+    <text x="${CHART_W - PAD}" y="${CHART_H - 8}" class="axis" text-anchor="end">${xLast}</text>`);
+}
+
+function stackChartSvg(series, classNames) {
+  const n = series.length;
+  // Union of all class ids across the window, in a stable order.
+  const ids = [];
+  series.forEach(s => Object.keys(s.class_values).forEach(id => {
+    if (!ids.includes(id)) ids.push(id);
+  }));
+  if (n < 2 || !ids.length) {
+    return _chartSvg(_centerHint(n < 2 ? "再攒几天就有堆叠图" : "暂无大类市值"));
+  }
+  const totals = series.map(s => ids.reduce((a, id) => a + (s.class_values[id] || 0), 0));
+  const hi = Math.max(...totals, 1);
+
+  // Build stacked areas bottom-up.
+  const bands = ids.map(() => []);
+  series.forEach((s, i) => {
+    let acc = 0;
+    ids.forEach((id, k) => {
+      const v = s.class_values[id] || 0;
+      const y0 = _scaleY(acc, 0, hi);
+      const y1 = _scaleY(acc + v, 0, hi);
+      bands[k].push([_scaleX(i, n), y0, y1]);
+      acc += v;
+    });
+  });
+
+  const areas = ids.map((id, k) => {
+    const top = bands[k].map(p => `${p[0].toFixed(1)},${p[2].toFixed(1)}`);
+    const bot = bands[k].map(p => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).reverse();
+    const fill = stackColor(id, classNames);
+    return `<polygon points="${top.concat(bot).join(" ")}" fill="${fill}" opacity="0.85"/>`;
+  }).join("");
+
+  return _chartSvg(areas);
+}
+
+function stackColor(id, classNames) {
+  const c = classNames[id];
+  return c ? colorVar(c.color) : "#bdb3a6";  // deleted class → neutral grey
+}
+function stackLabel(id, classNames) {
+  const c = classNames[id];
+  return c ? c.name : "已删除大类";
+}
+
+function renderStackLegend(series, classNames) {
+  const ids = [];
+  series.forEach(s => Object.keys(s.class_values).forEach(id => {
+    if (!ids.includes(id)) ids.push(id);
+  }));
+  byId("trend-stack-legend").innerHTML = ids.map(id =>
+    `<span class="leg"><i style="background:${stackColor(id, classNames)}"></i>${stackLabel(id, classNames)}</span>`
+  ).join("");
 }

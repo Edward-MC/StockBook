@@ -11,11 +11,11 @@ from sqlalchemy.orm import Session
 
 import httpx
 
-from .. import backup, calc, config, quotes, schemas
+from .. import backup, calc, config, quotes, schemas, snapshot_service
 from ..database import get_db
 from ..models import AssetClass, CashFlow, PriceQuote, Security, Transaction
 from ..seed import reset_to_default
-from ..services import build_dashboard, build_ledger, get_primary_strategy, security_payload
+from ..services import apply_fetched_quotes, build_dashboard, build_ledger, get_primary_strategy, security_payload
 
 router = APIRouter(prefix="/api", tags=["api"])
 
@@ -461,21 +461,7 @@ def refresh_prices(db: Session = Depends(get_db)):
     except httpx.HTTPError:
         raise HTTPException(status_code=502, detail="行情源连接失败,已保留现有价格")
 
-    now = datetime.now()
-    updated = 0
-    for sec in securities:
-        q = fetched.get(sec.code)
-        if not q:
-            continue
-        if sec.quote is None:
-            sec.quote = PriceQuote(security_id=sec.id)
-        sec.quote.price = q["price"]
-        sec.quote.source = "auto"
-        sec.quote.updated_at = now
-        # Backfill a placeholder name (auto-created securities start name == code).
-        if q.get("name") and sec.name == sec.code:
-            sec.name = q["name"]
-        updated += 1
+    updated = apply_fetched_quotes(db, fetched)
     db.commit()
     # Codes the source returned nothing for (unclassifiable market, delisted,
     # suspended…) — surfaced so they don't fail silently.
@@ -550,3 +536,23 @@ def reset(db: Session = Depends(get_db)):
         pass
     reset_to_default(db)
     return {"ok": True}
+
+
+# --------------------------------------------------------------------------- #
+# History + performance: daily NAV snapshot + time series / metrics.
+# --------------------------------------------------------------------------- #
+@router.post("/snapshot", dependencies=[Depends(require_writable)])
+def take_snapshot(db: Session = Depends(get_db)):
+    snap = snapshot_service.run_snapshot(db)
+    return {
+        "date": snap.date.isoformat(),
+        "total_assets": snap.total_assets,
+        "net_invested": snap.net_invested,
+        "benchmark": snap.benchmark,
+    }
+
+
+@router.get("/history")
+def history(range_: str = Query("all", alias="range"), db: Session = Depends(get_db)):
+    range_ = range_ if range_ in ("3m", "1y", "all") else "all"
+    return snapshot_service.build_history(db, range_=range_)

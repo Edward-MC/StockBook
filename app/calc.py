@@ -11,8 +11,11 @@ Conventions:
 """
 from __future__ import annotations
 
+import datetime as dt
+import math
+import statistics
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Sequence, Tuple
 
 # Status codes for an asset class relative to its tolerance band.
 STATUS_UNDER = "under"  # current < band_low  → 需加仓
@@ -298,3 +301,108 @@ def compute_dashboard(classes: List[AssetClassInput], *, cash_balance: float = 0
         rebalance=rebalance,
         pending_securities=pending,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Performance analytics (history+performance spec §5). Pure: dates + floats in,
+# float/None out. Sign conventions live in the caller (snapshot_service);
+# these only crunch numbers so they stay trivially testable.
+# --------------------------------------------------------------------------- #
+def _npv(rate: float, flows: Sequence[Tuple[dt.date, float]], d0: dt.date) -> float:
+    """Net present value of signed dated flows at annual `rate` (ACT/365)."""
+    total = 0.0
+    for d, amt in flows:
+        years = (d - d0).days / 365.0
+        total += amt / ((1.0 + rate) ** years)
+    return total
+
+
+def xirr(flows: Sequence[Tuple[dt.date, float]]) -> Optional[float]:
+    """Money-weighted IRR of signed dated cash flows (investor view: money in
+    negative, money/value out positive). Solves Σ amt/(1+r)^(days/365)=0 by
+    bisection on [-0.9999, 10]. Returns None when undefined: <2 flows, all
+    zero, or no sign change in NPV across the search interval."""
+    flows = [(d, float(a)) for d, a in flows]
+    if len(flows) < 2:
+        return None
+    if all(a == 0.0 for _, a in flows):
+        return None
+    d0 = min(d for d, _ in flows)
+    lo, hi = -0.9999, 10.0
+    f_lo, f_hi = _npv(lo, flows, d0), _npv(hi, flows, d0)
+    if f_lo == 0.0:
+        return lo
+    if f_hi == 0.0:
+        return hi
+    if (f_lo > 0) == (f_hi > 0):  # same sign → no bracketed root
+        return None
+    for _ in range(200):
+        mid = (lo + hi) / 2.0
+        f_mid = _npv(mid, flows, d0)
+        if abs(f_mid) < 1e-9 or (hi - lo) < 1e-12:
+            return mid
+        if (f_mid > 0) == (f_lo > 0):
+            lo, f_lo = mid, f_mid
+        else:
+            hi, f_hi = mid, f_mid
+    return (lo + hi) / 2.0
+
+
+def twr(values: Sequence[Tuple[dt.date, float]],
+        flows: Sequence[Tuple[dt.date, float]]) -> Optional[float]:
+    """Time-weighted return, annualized. `values`=(date, portfolio value) per
+    snapshot (ascending); `flows`=(date, external net inflow: deposits +,
+    withdrawals −). Segment return r_i=(V_end−V_begin−netflow_in_(begin,end])
+    /V_begin, chained then annualized over the span. Daily snapshots can only
+    pin flows to segment endpoints — an approximation (spec §5). Returns None
+    if <2 valid values, zero span, or the annualized figure overflows
+    (pathological single-day moves)."""
+    vals = sorted(values, key=lambda x: x[0])
+    if len(vals) < 2:
+        return None
+    growth = 1.0
+    valid_segments = 0
+    for (d_begin, v_begin), (d_end, v_end) in zip(vals, vals[1:]):
+        if v_begin <= 0:
+            continue
+        net_flow = sum(a for fd, a in flows if d_begin < fd <= d_end)
+        r = (v_end - v_begin - net_flow) / v_begin
+        growth *= (1.0 + r)
+        valid_segments += 1
+    span_days = (vals[-1][0] - vals[0][0]).days
+    if valid_segments == 0 or span_days <= 0 or growth <= 0:
+        return None
+    years = span_days / 365.0
+    try:
+        return growth ** (1.0 / years) - 1.0
+    except OverflowError:
+        return None
+
+
+def max_drawdown(nav: Sequence[float]) -> float:
+    """Largest peak-to-trough drop of a NAV series, in [0, 1]. 0.0 for empty,
+    single-point, or monotonically non-decreasing series."""
+    peak = None
+    worst = 0.0
+    for v in nav:
+        if peak is None or v > peak:
+            peak = v
+        if peak > 0:
+            worst = max(worst, (peak - v) / peak)
+    return worst
+
+
+def annualized_volatility(nav: Sequence[float]) -> Optional[float]:
+    """Sample std-dev of daily simple returns × √252. None if <2 NAV points or
+    any non-positive NAV. With exactly 2 NAV points (a single return) there is
+    no sample dispersion, so we fall back to |r|·√252 (a constant series → 0.0).
+    For ≥3 points it is the sample std-dev of the returns. 0.0 for constant or
+    constant-ratio series. NOTE: √252 assumes regular trading-day sampling;
+    sparse/irregular snapshots inflate noise — treat as indicative only (§5)."""
+    nav = list(nav)
+    if len(nav) < 2 or any(v <= 0 for v in nav):
+        return None
+    rets = [nav[i] / nav[i - 1] - 1.0 for i in range(1, len(nav))]
+    if len(rets) < 2:
+        return abs(rets[0]) * math.sqrt(252.0)  # single return: |r|·√252
+    return statistics.stdev(rets) * math.sqrt(252.0)

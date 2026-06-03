@@ -6,6 +6,7 @@
   <button class="tab active" data-tab="dashboard">仪表盘</button>
   <button class="tab" data-tab="holdings">持仓</button>
   <button class="tab" data-tab="records">记录</button>
+  <button class="tab" data-tab="trends">走势</button>
 </div>
 
 <!-- ============ 仪表盘 ============ -->
@@ -83,6 +84,35 @@
     <div class="card cash-overview" id="cash-overview"></div>
     <div class="rec-filters" id="rec-filters"></div>
     <div class="card ledger" id="ledger-list"></div>
+  </section>
+</div>
+
+<!-- ============ 走势 ============ -->
+<div class="panel" id="panel-trends" hidden>
+  <section style="animation:none">
+    <div class="card">
+      <div class="trends-head">
+        <h2>走势 · 绩效</h2>
+        <div class="range-switch" id="trend-range">
+          <button data-range="3m">3月</button>
+          <button data-range="1y">1年</button>
+          <button data-range="all" class="active">全部</button>
+        </div>
+      </div>
+      <div class="metric-cards" id="trend-metrics"></div>
+    </div>
+    <div class="card">
+      <div class="trends-head">
+        <h3>净值曲线</h3>
+        <div class="series-toggle" id="trend-series-toggle"></div>
+      </div>
+      <div id="trend-chart"></div>
+    </div>
+    <div class="card">
+      <h3>各大类市值(堆叠)</h3>
+      <div id="trend-stack"></div>
+      <div class="legend" id="trend-stack-legend"></div>
+    </div>
   </section>
 </div>
 {% endblock %}

@@ -5,13 +5,14 @@ result into the dashboard response payload.
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from . import calc, quotes
-from .models import AssetClass, CashFlow, Strategy, Transaction
+from .models import AssetClass, CashFlow, PriceQuote, Security, Strategy, Transaction
 
 
 def security_payload(*, id, code, name, market, shares, price, market_value,
@@ -56,6 +57,29 @@ def cash_components(db: Session) -> dict:
         "buy_amount": buy_amt, "sell_amount": sell_amt,
         "cash_balance": deposits - withdrawals + sell_amt - buy_amt,
     }
+
+
+def apply_fetched_quotes(db: Session, fetched: dict) -> int:
+    """Write fetched {code: {"price","name"}} into PriceQuote rows as source
+    'auto', backfilling placeholder names (name == code). Returns the number of
+    securities updated. Does NOT commit — the caller commits. Shared by the
+    /prices/refresh endpoint and the daily snapshot capture (DRY)."""
+    securities = db.scalars(select(Security)).all()
+    now = datetime.now()
+    updated = 0
+    for sec in securities:
+        q = fetched.get(sec.code)
+        if not q:
+            continue
+        if sec.quote is None:
+            sec.quote = PriceQuote(security_id=sec.id)
+        sec.quote.price = q["price"]
+        sec.quote.source = "auto"
+        sec.quote.updated_at = now
+        if q.get("name") and sec.name == sec.code:
+            sec.name = q["name"]
+        updated += 1
+    return updated
 
 
 def _to_calc_inputs(strategy: Strategy):
