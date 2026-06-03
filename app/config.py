@@ -73,3 +73,10 @@ BACKUP_KEEP = int(os.getenv("STOCKBOOK_BACKUP_KEEP", "30"))
 # copy (Fernet + scrypt). Empty = offsite stays plaintext (a warning is logged).
 # Secret — .env only, never committed/logged.
 BACKUP_PASSPHRASE = os.getenv("STOCKBOOK_BACKUP_PASSPHRASE", "")
+
+# History + performance (daily NAV snapshots). BENCHMARK_CODE carries an explicit
+# market prefix (sh000300 = 沪深300) because indices are not stocks and the
+# per-stock code→market heuristic would mis-route them; empty = skip benchmark.
+# INTERVAL 0 disables the in-process daily-snapshot scheduler.
+BENCHMARK_CODE = os.getenv("STOCKBOOK_BENCHMARK_CODE", "sh000300")
+SNAPSHOT_INTERVAL_HOURS = int(os.getenv("STOCKBOOK_SNAPSHOT_INTERVAL_HOURS", "24"))
