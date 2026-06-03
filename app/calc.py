@@ -355,7 +355,8 @@ def twr(values: Sequence[Tuple[dt.date, float]],
     withdrawals −). Segment return r_i=(V_end−V_begin−netflow_in_(begin,end])
     /V_begin, chained then annualized over the span. Daily snapshots can only
     pin flows to segment endpoints — an approximation (spec §5). Returns None
-    if <2 valid values or zero span."""
+    if <2 valid values, zero span, or the annualized figure overflows
+    (pathological single-day moves)."""
     vals = sorted(values, key=lambda x: x[0])
     if len(vals) < 2:
         return None
@@ -372,7 +373,10 @@ def twr(values: Sequence[Tuple[dt.date, float]],
     if valid_segments == 0 or span_days <= 0 or growth <= 0:
         return None
     years = span_days / 365.0
-    return growth ** (1.0 / years) - 1.0
+    try:
+        return growth ** (1.0 / years) - 1.0
+    except OverflowError:
+        return None
 
 
 def max_drawdown(nav: Sequence[float]) -> float:

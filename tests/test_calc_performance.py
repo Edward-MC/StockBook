@@ -50,6 +50,13 @@ def test_twr_too_few_points_returns_none():
     assert twr([], []) is None
 
 
+def test_twr_overflow_returns_none():
+    # Pathological >7x move over a single day annualizes past float64 → None,
+    # not an OverflowError (spec §5: any input never throws).
+    r = twr([(d(0), 1.0), (d(1), 100.0)], [])
+    assert r is None
+
+
 # ------------------------- max_drawdown --------------------------------- #
 def test_max_drawdown_basic():
     # peak 100 → trough 60 → recover: max DD = 40%.
