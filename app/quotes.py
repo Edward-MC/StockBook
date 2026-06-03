@@ -38,6 +38,9 @@ _TENCENT_URL = "https://qt.gtimg.cn/q="
 _SINA_URL = "https://hq.sinajs.cn/list="
 _EASTMONEY_URL = ("https://push2.eastmoney.com/api/qt/ulist.np/get"
                   "?fields=f1,f2,f12,f13,f14&secids=")
+# Eastmoney daily kline (history). fields2=f51,f53 → each row "YYYY-MM-DD,close".
+_EM_KLINE_URL = ("https://push2his.eastmoney.com/api/qt/stock/kline/get"
+                 "?fields1=f1&fields2=f51,f53&klt=101&fqt=0&end=20500101")
 _TIMEOUT = 6.0
 # Last source that successfully served a fetch (diagnostic; surfaced in refresh).
 LAST_SOURCE: Optional[str] = None
@@ -159,6 +162,29 @@ def parse_eastmoney(text: str) -> Dict[str, dict]:
     return out
 
 
+def parse_em_kline(text: str) -> List[Tuple[dt.date, float]]:
+    """Parse Eastmoney kline JSON {data:{klines:["YYYY-MM-DD,close", ...]}} into
+    [(date, close)] ascending. Malformed rows are skipped; bad/empty -> []."""
+    out: List[Tuple[dt.date, float]] = []
+    try:
+        klines = (json.loads(text).get("data") or {}).get("klines") or []
+    except (ValueError, AttributeError):
+        return out
+    if not isinstance(klines, list):
+        return out
+    for row in klines:
+        parts = str(row).split(",")
+        if len(parts) < 2:
+            continue
+        try:
+            d = dt.date.fromisoformat(parts[0])
+            close = float(parts[1])
+        except ValueError:
+            continue
+        out.append((d, close))
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Per-source fetchers — each raises httpx.HTTPError on transport failure.
 # --------------------------------------------------------------------------- #
@@ -167,6 +193,17 @@ def _get(url: str, headers: Optional[dict] = None) -> httpx.Response:
         r = client.get(url, headers=headers or {})
         r.raise_for_status()
         return r
+
+
+def fetch_index_history(code: str, market: str, days: int) -> List[Tuple[dt.date, float]]:
+    """Daily closes for an index over ~`days` rows via Eastmoney kline. Returns
+    [(date, close)] ascending; raises httpx.HTTPError on transport failure.
+    Empty list if the code can't be mapped to a secid."""
+    secid = to_em_secid(code, market)
+    if not secid:
+        return []
+    r = _get(f"{_EM_KLINE_URL}&secid={secid}&lmt={int(days)}")
+    return parse_em_kline(r.text)
 
 
 # --------------------------------------------------------------------------- #
